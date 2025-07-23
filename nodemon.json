@@ -1,0 +1,14 @@
+{
+    "ignore": [
+        "auth/*",
+        "*.log",
+        "node_modules/*",
+        ".git/*"
+    ],
+    "watch": [
+        "src/*"
+    ],
+    "ext": "js",
+    "delay": "2500",
+    "verbose": false
+} 
