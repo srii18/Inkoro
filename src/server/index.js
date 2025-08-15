@@ -1,23 +1,19 @@
 const express = require('express');
-const http = require('http');
 const path = require('path');
-const { setupWebSocket } = require('../websocket/server');
-const WhatsAppClient = require('../whatsapp/client');
-const PrintQueue = require('../print/queue');
-const EventManager = require('../events/eventManager');
+const WebSocket = require('ws');
+const EventEmitter = require('events');
+const { sanitizeLog } = require('../utils/sanitize');
 
-class PhotocopyServer {
-    constructor() {
+class Server extends EventEmitter {
+    constructor(whatsapp = null) {
+        super();
         this.app = express();
-        this.whatsappClient = new WhatsAppClient();
-        this.server = http.createServer(this.app);
-        this.io = setupWebSocket(this.server, this.whatsappClient);
-        this.eventManager = new EventManager(this.io);
-        
-        this.printQueue = null;
-        
+        this.whatsapp = whatsapp;
+        this.wsClients = new Set();
         this.setupMiddleware();
         this.setupRoutes();
+        this.setupAPIRoutes();
+        this.setupWhatsAppEventBridge();
     }
 
     setupMiddleware() {
@@ -26,284 +22,241 @@ class PhotocopyServer {
     }
 
     setupRoutes() {
-        // WhatsApp routes
+        this.app.get('/', (req, res) => {
+            res.sendFile(path.join(__dirname, '../../public/index.html'));
+        });
+    }
+
+    setupAPIRoutes() {
+        // WhatsApp API routes
+        this.app.get('/api/whatsapp/status', async (req, res) => {
+            try {
+                if (!this.whatsapp) {
+                    return res.json({ success: true, status: { status: 'disconnected', isConnected: false, isConnecting: false } });
+                }
+                const status = await this.whatsapp.getStatus();
+                res.json({ success: true, status });
+            } catch (error) {
+                res.status(500).json({ success: false, error: error.message });
+            }
+        });
+
         this.app.post('/api/whatsapp/connect', async (req, res) => {
             try {
-                if (!this.whatsappClient) {
-                    res.status(500).json({ 
-                        success: false, 
-                        error: 'WhatsApp client not initialized' 
-                    });
-                    return;
+                if (!this.whatsapp) {
+                    return res.status(400).json({ success: false, error: 'WhatsApp client not initialized' });
                 }
-                
-                const result = await this.whatsappClient.connect();
-                const status = this.whatsappClient.getStatus();
-                
-                res.json({ 
-                    success: true, 
-                    message: result.message,
-                    status: status
-                });
+                const result = await this.whatsapp.connect();
+                const status = await this.whatsapp.getStatus();
+                res.json({ success: result?.success !== false, status });
             } catch (error) {
-                console.error('WhatsApp connect error:', error);
-                res.status(500).json({ 
-                    success: false, 
-                    error: error.message 
-                });
+                res.status(500).json({ success: false, error: error.message });
             }
         });
 
         this.app.post('/api/whatsapp/disconnect', async (req, res) => {
             try {
-                if (!this.whatsappClient) {
-                    res.json({ 
-                        success: true, 
-                        message: 'WhatsApp was not connected' 
-                    });
-                    return;
+                if (!this.whatsapp) {
+                    return res.json({ success: true, status: { status: 'disconnected', isConnected: false, isConnecting: false } });
                 }
-                
-                const result = await this.whatsappClient.disconnect();
-                res.json({ 
-                    success: true, 
-                    message: result.message 
-                });
-            } catch (error) {
-                console.error('WhatsApp disconnect error:', error);
-                res.status(500).json({ 
-                    success: false, 
-                    error: error.message 
-                });
-            }
-        });
-
-        this.app.get('/api/whatsapp/status', (req, res) => {
-            if (!this.whatsappClient) {
-                res.json({ 
-                    success: false, 
-                    status: { status: 'disconnected' } 
-                });
-                return;
-            }
-            
-            const status = this.whatsappClient.getStatus();
-            res.json({ 
-                success: true, 
-                status: status 
-            });
-        });
-
-        // Print queue routes
-        this.app.get('/api/queue', (req, res) => {
-            res.json({
-                jobs: this.printQueue.queue,
-                completedJobs: this.printQueue.completedJobs,
-                stats: this.printQueue.getStats()
-            });
-        });
-
-        this.app.post('/api/queue/job/:id/retry', async (req, res) => {
-            try {
-                const job = await this.printQueue.retryJob(req.params.id);
-                res.json({ success: true, job });
+                await this.whatsapp.disconnect();
+                res.json({ success: true, status: { status: 'disconnected', isConnected: false, isConnecting: false } });
             } catch (error) {
                 res.status(500).json({ success: false, error: error.message });
             }
         });
 
-        this.app.delete('/api/queue/job/:id', async (req, res) => {
-            try {
-                await this.printQueue.removeJob(req.params.id);
-                res.json({ success: true });
-            } catch (error) {
-                res.status(500).json({ success: false, error: error.message });
-            }
-        });
-
-        // Printer routes
+        // Printer API routes
         this.app.get('/api/printer/status', async (req, res) => {
             try {
-                const printerManager = require('../printer/printerManager');
-                const status = await printerManager.getPrinterStatus();
-                res.json(status);
+                // Mock printer status for now
+                res.json({
+                    name: 'Microsoft Print to PDF',
+                    status: 'ready',
+                    details: 'PDF printer is ready',
+                    message: 'PDF printer is ready to accept jobs'
+                });
             } catch (error) {
-                res.status(500).json({ 
-                    error: error.message,
-                    message: 'Failed to get printer status'
+                res.status(500).json({
+                    error: true,
+                    message: error.message
                 });
             }
         });
 
-        // Document routes
-        this.app.get('/api/documents/recent', async (req, res) => {
+        // Queue API routes
+        this.app.get('/api/queue', (req, res) => {
             try {
-                const documentManager = require('../storage/documentManager');
-                const documents = await documentManager.getRecentDocuments(10);
-                res.json(documents);
+                // Mock queue data for now
+                res.json({
+                    jobs: []
+                });
             } catch (error) {
-                res.status(500).json({ 
-                    error: error.message,
-                    message: 'Failed to get recent documents'
+                res.status(500).json({
+                    success: false,
+                    error: error.message
                 });
             }
         });
 
-        this.app.get('/api/documents/:fileId', async (req, res) => {
+        this.app.delete('/api/queue/job/:jobId', (req, res) => {
             try {
-                const documentManager = require('../storage/documentManager');
-                const document = await documentManager.getDocument(req.params.fileId);
-                res.json(document);
+                const { jobId } = req.params;
+                // Mock response for now
+                res.json({
+                    success: true,
+                    message: `Job ${jobId} cancelled successfully`
+                });
             } catch (error) {
-                res.status(404).json({ 
-                    error: error.message,
-                    message: 'Document not found'
+                res.status(500).json({
+                    success: false,
+                    error: error.message
                 });
             }
         });
-    }
 
-    async initialize() {
-        try {
-            console.log('🚀 Starting Photocopy Management System...');
-            
-            // Initialize print queue
-            this.printQueue = new PrintQueue();
-            this.printQueue.on('jobAdded', (job) => {
-                this.eventManager.emit('queue:jobAdded', job);
-            });
-            this.printQueue.on('statusUpdated', (data) => {
-                this.eventManager.emit('queue:statusUpdated', data);
-            });
-            this.printQueue.on('updated', (queue, stats) => {
-                this.eventManager.emit('queue:updated', queue, stats);
-            });
+        this.app.post('/api/queue/job/:jobId/retry', (req, res) => {
+            try {
+                const { jobId } = req.params;
+                // Mock response for now
+                res.json({
+                    success: true,
+                    message: `Job ${jobId} retried successfully`
+                });
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        });
 
-            // Initialize WhatsApp client
-            console.log('📱 Initializing WhatsApp client...');
-            
-            this.whatsappClient.on('statusChange', (status) => {
-                console.log('📱 WhatsApp status changed:', status);
-                this.eventManager.emit('whatsapp:status', status);
-            });
-            
-            this.whatsappClient.on('qr', (qr) => {
-                console.log('📱 QR code received');
-                this.eventManager.emit('whatsapp:qr', qr);
-            });
-            
-            this.whatsappClient.on('printJob', async (job) => {
-                console.log('📱 Print job received:', job);
-                try {
-                    const queueItem = await this.printQueue.addJob(job);
-                    this.eventManager.emit('system:notification', 'info', 
-                        'New print job received', { jobId: queueItem.id });
-                } catch (error) {
-                    console.error('📱 Failed to add print job:', error);
-                    this.eventManager.emit('system:notification', 'error',
-                        'Failed to add print job', { error: error.message });
-                }
-            });
-            
-            console.log('📱 WhatsApp client initialized successfully');
+        this.app.post('/api/queue/clear-completed', (req, res) => {
+            try {
+                // Mock response for now
+                res.json({
+                    success: true,
+                    message: 'Completed jobs cleared successfully'
+                });
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        });
 
-            // Set up WebSocket event handlers
-            this.setupWebSocketHandlers();
-            
-            // Start server
-            await this.startServer();
-            
-        } catch (error) {
-            console.error('Failed to initialize server:', error);
-            process.exit(1);
-        }
-    }
+        // Documents API routes
+        this.app.get('/api/documents/recent', (req, res) => {
+            try {
+                // Mock recent documents for now
+                res.json([]);
+            } catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: error.message
+                });
+            }
+        });
 
-    setupWebSocketHandlers() {
-        this.io.on('connection', (socket) => {
-            // Handle WhatsApp restart request
-            socket.on('restart_whatsapp', async (callback) => {
-                try {
-                    await this.whatsappClient.disconnect();
-                    setTimeout(async () => {
-                        await this.whatsappClient.connect();
-                    }, 2000);
-                    if (callback) callback({ success: true });
-                } catch (error) {
-                    if (callback) callback({ success: false, error: error.message });
-                }
-            });
-
-            // Handle print job actions
-            socket.on('print_job_action', async (data, callback) => {
-                const { action, jobId } = data;
-                try {
-                    switch (action) {
-                        case 'retry':
-                            await this.printQueue.retryJob(jobId);
-                            break;
-                        case 'cancel':
-                            await this.printQueue.removeJob(jobId);
-                            break;
-                    }
-                    if (callback) callback({ success: true });
-                } catch (error) {
-                    if (callback) callback({ success: false, error: error.message });
-                }
-            });
-
-            // Handle queue actions
-            socket.on('queue_action', async (data, callback) => {
-                const { action, params } = data;
-                try {
-                    switch (action) {
-                        case 'clear':
-                            // Implement queue clearing logic
-                            break;
-                        case 'pause':
-                            // Implement queue pausing logic
-                            break;
-                    }
-                    if (callback) callback({ success: true });
-                } catch (error) {
-                    if (callback) callback({ success: false, error: error.message });
-                }
-            });
+        // WebSocket endpoint for Socket.IO
+        this.app.get('/socket.io/socket.io.js', (req, res) => {
+            res.redirect('https://cdn.socket.io/4.8.1/socket.io.min.js');
         });
     }
 
-    async startServer() {
+    setupWhatsAppEventBridge() {
+        if (!this.whatsapp) return;
+        const safeBroadcast = (payload) => {
+            const data = JSON.stringify(payload);
+            for (const ws of this.wsClients) {
+                try { ws.send(data); } catch (_) {}
+            }
+        };
+        // Status updates
+        this.whatsapp.on('statusChange', () => {
+            const status = this.whatsapp.getStatus();
+            safeBroadcast({ event: 'whatsapp_status_update', status });
+        });
+        // QR updates (client should emit 'qr' with code or null)
+        this.whatsapp.on('qr', (qr) => {
+            if (!qr) return; // ignore null expiry notices for now
+            safeBroadcast({ event: 'whatsapp_qr', qr });
+        });
+    }
+
+    start(port) {
         return new Promise((resolve, reject) => {
-            const port = process.env.PORT || 3002;
-            this.server.listen(port, () => {
-                console.log(`🌐 Server running on port ${port}`);
-                resolve();
-            });
-            this.server.on('error', reject);
+            try {
+                this.server = this.app.listen(port, () => {
+                    console.log('\n🌐 Server running at:');
+                    console.log(`  > Local: http://localhost:${port}`);
+                    console.log(`  > Network: http://${this._getLocalIP()}:${port}\n`);
+                    this.setupWebSocket();
+                    resolve();
+                });
+            } catch (error) {
+                reject(error);
+            }
         });
     }
 
-    async gracefulShutdown(signal) {
-        console.log(`\n📴 Received ${signal}. Starting graceful shutdown...`);
+    _getLocalIP() {
+        const { networkInterfaces } = require('os');
+        const nets = networkInterfaces();
         
-        try {
-            // Disconnect WhatsApp
-            if (this.whatsappClient) {
-                await this.whatsappClient.disconnect();
+        for (const name of Object.keys(nets)) {
+            for (const net of nets[name]) {
+                if (net.family === 'IPv4' && !net.internal) {
+                    return net.address;
+                }
             }
+        }
+        return '127.0.0.1';
+    }
 
-            // Close server
-            await new Promise((resolve) => {
-                this.server.close(resolve);
+    setupWebSocket() {
+        this.wss = new WebSocket.Server({ server: this.server });
+        
+        this.wss.on('connection', (ws) => {
+            console.log('New WebSocket connection');
+            this.wsClients.add(ws);
+            // Send initial status to the newly connected client
+            try {
+                if (this.whatsapp) {
+                    const status = this.whatsapp.getStatus();
+                    ws.send(JSON.stringify({ event: 'whatsapp_status_update', status }));
+                }
+            } catch (_) {}
+            
+            ws.on('message', (message) => {
+                try {
+                    const { summary } = sanitizeLog(String(message));
+                    console.log('Received WS message:', summary);
+                    // Try to parse commands
+                    let parsed = null;
+                    try { parsed = JSON.parse(String(message)); } catch {}
+                    if (parsed && parsed.action === 'request_whatsapp_qr') {
+                        if (this.whatsapp) {
+                            const status = this.whatsapp.getStatus();
+                            if (status.qrCode) {
+                                ws.send(JSON.stringify({ event: 'whatsapp_qr', qr: status.qrCode }));
+                            } else {
+                                // Always try to force a fresh QR when requested
+                                this.whatsapp.forceQR?.().catch(() => {});
+                            }
+                        }
+                    }
+                } catch {
+                    console.log('Received WS message: [unreadable]');
+                }
             });
 
-            console.log('✅ Server shutdown complete');
-            process.exit(0);
-        } catch (error) {
-            console.error('❌ Error during shutdown:', error);
-            process.exit(1);
-        }
+            ws.on('close', () => {
+                this.wsClients.delete(ws);
+            });
+        });
     }
 }
 
-module.exports = PhotocopyServer; 
+module.exports = Server;

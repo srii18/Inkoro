@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inkoro</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <style>
+        .status-badge {
+            padding: 0.25rem 0.5rem; /* px-2 py-1 */
+            border-radius: 9999px;   /* rounded-full */
+            font-size: 0.75rem;      /* text-xs */
+            line-height: 1rem;
+            font-weight: 600;        /* font-semibold */
+        }
+        .status-queued { background-color: #FEF3C7; color: #92400E; }
+        .status-processing { background-color: #DBEAFE; color: #1E40AF; }
+        .status-active { background-color: #DBEAFE; color: #1E40AF; }
+        .status-completed { background-color: #D1FAE5; color: #065F46; }
+        .status-failed { background-color: #FEE2E2; color: #991B1B; }
+        .status-pending { background-color: #EDE9FE; color: #5B21B6; }
+        
+        /* Task Management Styles */
+        .task-filter {
+            background-color: #E5E7EB; /* bg-gray-200 */
+            color: #374151;            /* text-gray-700 */
+            transition: color 150ms ease-in-out, background-color 150ms ease-in-out; /* transition-colors */
+        }
+        .task-filter:hover { background-color: #D1D5DB; } /* hover:bg-gray-300 */
+        .task-filter.active {
+            background-color: #3B82F6; /* bg-blue-500 */
+            color: #FFFFFF;            /* text-white */
+        }
+        .task-item {
+            border: 1px solid #E5E7EB; /* border-gray-200 */
+            border-radius: 0.5rem;     /* rounded-lg */
+            padding: 1rem;             /* p-4 */
+            transition: all 200ms ease-in-out; /* transition-all duration-200 */
+        }
+        .task-item:hover {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); /* shadow-md */
+            border-color: #D1D5DB; /* border-gray-300 */
+        }
+        .task-item.completed {
+            background-color: #F9FAFB; /* bg-gray-50 */
+            opacity: 0.75;             /* opacity-75 */
+        }
+        .task-priority-high {
+            border-left: 4px solid #EF4444; /* red-500 */
+        }
+        .task-priority-medium {
+            border-left: 4px solid #F59E0B; /* yellow-500 */
+        }
+        .task-priority-low {
+            border-left: 4px solid #10B981; /* green-500 */
+        }
+        
+        .notification-enter {
+            animation: slideInRight 0.3s ease-out;
+        }
+        
+        @keyframes slideInRight {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow">
+            <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center">
+                    <h1 class="text-3xl font-bold text-gray-900">Inkoro</h1>
+                    <div id="whatsappStatus" class="flex items-center space-x-2">
+                        <div class="w-3 h-3 rounded-full bg-gray-300"></div>
+                        <span class="text-sm text-gray-600">WhatsApp: Disconnected</span>
+                        <div class="ml-4 space-x-2">
+                            <button onclick="connectWhatsApp()" class="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 text-sm">Connect</button>
+                            <button onclick="disconnectWhatsApp()" class="px-3 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-sm">Disconnect</button>
+                            <button id="showQRButton" onclick="requestQR()" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm hidden">Show QR</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- QR Code Modal -->
+        <div id="qrModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden flex items-center justify-center">
+            <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold">Scan QR Code</h3>
+                    <button onclick="closeQRModal()" class="text-gray-500 hover:text-gray-700">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div id="qrCode" class="flex justify-center mb-4"></div>
+                <p class="text-sm text-gray-600 text-center">Scan this QR code with WhatsApp on your phone</p>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+            <!-- Task Management Section -->
+            <div class="bg-white shadow rounded-lg p-6 mb-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold">Task Management</h2>
+                    <div class="flex items-center space-x-4">
+                        <div class="flex space-x-2 text-sm">
+                            <span class="text-gray-600">Total: <span id="totalTasks" class="font-semibold">0</span></span>
+                            <span class="text-gray-600">Pending: <span id="pendingTasks" class="font-semibold">0</span></span>
+                            <span class="text-gray-600">Completed: <span id="completedTasks" class="font-semibold">0</span></span>
+                        </div>
+                        <button onclick="addNewTask()" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm">
+                            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
+                            </svg>
+                            Add Task
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Task Form -->
+                <div id="taskForm" class="hidden mb-4 p-4 bg-gray-50 rounded-lg">
+                    <div class="flex space-x-2">
+                        <input type="text" id="taskInput" placeholder="Enter task description..." 
+                               class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <select id="taskPriority" class="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="low">Low</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                        <button onclick="saveTask()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Save</button>
+                        <button onclick="cancelTask()" class="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600">Cancel</button>
+                    </div>
+                </div>
+
+                <!-- Task Filters -->
+                <div class="flex space-x-2 mb-4">
+                    <button onclick="filterTasks('all')" data-filter="all" class="task-filter active px-3 py-1 rounded text-sm">All</button>
+                    <button onclick="filterTasks('pending')" data-filter="pending" class="task-filter px-3 py-1 rounded text-sm">Pending</button>
+                    <button onclick="filterTasks('completed')" data-filter="completed" class="task-filter px-3 py-1 rounded text-sm">Completed</button>
+                    <button onclick="filterTasks('high')" data-filter="high" class="task-filter px-3 py-1 rounded text-sm">High Priority</button>
+                </div>
+
+                <!-- Task List -->
+                <div id="taskList" class="space-y-3">
+                    <!-- Tasks will be dynamically inserted here -->
+                </div>
+            </div>
+
+            <!-- Recent Documents Section -->
+            <div class="bg-white shadow rounded-lg p-6 mb-6">
+                <h2 class="text-xl font-semibold mb-4">Recent Documents</h2>
+                <div id="recentDocuments" class="space-y-4">
+                    <!-- Documents will be dynamically inserted here -->
+                </div>
+            </div>
+
+            <!-- Print Jobs Section -->
+            <div class="bg-white shadow rounded-lg p-6 mb-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold">Print Jobs</h2>
+                    <div class="flex space-x-2">
+                        <button onclick="refreshJobs()" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm">
+                            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                        <button onclick="clearCompletedJobs()" class="px-3 py-1 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm">
+                            Clear Completed
+                        </button>
+                    </div>
+                </div>
+                <div id="printJobs" class="space-y-4">
+                    <!-- Jobs will be dynamically inserted here -->
+                </div>
+            </div>
+
+            <!-- Printer Status Section -->
+            <div class="bg-white shadow rounded-lg p-6">
+                <h2 class="text-xl font-semibold mb-4">Printer Status</h2>
+                <div id="printerStatus" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- Status will be dynamically inserted here -->
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let connectionCheckInterval = null;
+        let socket = null;
+        let qrTimeout = null;
+        let lastQR = null;
+        let qrModalVisible = false;
+        let wsReconnectAttempts = 0;
+        let wsReconnectTimer = null;
+        
+        // Task Management Variables
+        let tasks = JSON.parse(localStorage.getItem('photocopy_tasks') || '[]');
+        let currentFilter = 'all';
+        let taskIdCounter = parseInt(localStorage.getItem('task_id_counter') || '1');
+
+        // Initialize WebSocket connection (native WebSocket) with auto-reconnect
+        function initializeWebSocket() {
+            try {
+                const protocol = (location.protocol === 'https:') ? 'wss' : 'ws';
+                socket = new WebSocket(`${protocol}://${location.host}`);
+
+                socket.addEventListener('open', () => {
+                    console.log('WebSocket connected');
+                    // reset backoff state
+                    wsReconnectAttempts = 0;
+                    if (wsReconnectTimer) {
+                        clearTimeout(wsReconnectTimer);
+                        wsReconnectTimer = null;
+                    }
+                    // get latest status immediately after reconnect
+                    checkConnectionStatus();
+                });
+
+                socket.addEventListener('message', (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.event === 'whatsapp_status_update' && data.status) {
+                            updateWhatsAppStatus(data.status);
+                            // If status is connecting or disconnected during an active connect flow, show modal
+                            if ((data.status.status === 'connecting' || data.status.status === 'disconnected') && !qrModalVisible) {
+                                document.getElementById('qrModal').classList.remove('hidden');
+                                qrModalVisible = true;
+                            }
+                        } else if (data.event === 'whatsapp_qr' && data.qr) {
+                            console.log('WhatsApp QR code received');
+                            showQRCode(data.qr);
+                        }
+                    } catch (e) {
+                        console.log('Non-JSON WS message');
+                    }
+                });
+
+                socket.addEventListener('close', () => {
+                    console.log('WebSocket disconnected');
+                    scheduleWSReconnect();
+                });
+
+                socket.addEventListener('error', (err) => {
+                    console.error('WebSocket error', err);
+                    try { socket.close(); } catch (_) {}
+                });
+            } catch (e) {
+                console.error('Failed to initialize WebSocket', e);
+                scheduleWSReconnect();
+            }
+        }
+
+        function scheduleWSReconnect() {
+            if (wsReconnectTimer) return; // already scheduled
+            const base = 500; // ms
+            const max = 10000; // ms cap
+            const delay = Math.min(max, base * Math.pow(2, wsReconnectAttempts)) + Math.floor(Math.random() * 200);
+            wsReconnectAttempts++;
+            wsReconnectTimer = setTimeout(() => {
+                wsReconnectTimer = null;
+                console.log('Reconnecting WebSocket...');
+                initializeWebSocket();
+            }, delay);
+        }
+        // Initialize WebSocket when page loads
+        window.addEventListener('load', () => {
+            initializeWebSocket();
+            checkConnectionStatus();
+            setInterval(checkConnectionStatus, 5000);
+            // Hide/remove any deprecated Show QR button if present
+            const btn = document.getElementById('showQRButton');
+            if (btn) btn.remove();
+        });
+
+        // Function to update WhatsApp status
+        function updateWhatsAppStatus(status) {
+            const statusDot = document.querySelector('#whatsappStatus .w-3');
+            const statusText = document.querySelector('#whatsappStatus span');
+            
+            statusDot.className = 'w-3 h-3 rounded-full';
+            switch (status.status) {
+                case 'connected':
+                    statusDot.classList.add('bg-green-500');
+                    statusText.textContent = 'WhatsApp: Connected';
+                    document.getElementById('qrModal').classList.add('hidden');
+                    document.getElementById('showQRButton').classList.add('hidden');
+                    if (qrTimeout) clearTimeout(qrTimeout);
+                    qrModalVisible = false;
+                    break;
+                case 'connecting':
+                    statusDot.classList.add('bg-yellow-500');
+                    statusText.textContent = 'WhatsApp: Connecting...';
+                    // Auto-open QR modal and request QR while connecting
+                    document.getElementById('qrModal').classList.remove('hidden');
+                    if (!qrModalVisible) {
+                        qrModalVisible = true;
+                        requestQR();
+                    }
+                    break;
+                case 'reconnecting':
+                    statusDot.classList.add('bg-yellow-500');
+                    statusText.textContent = `WhatsApp: ${status.status === 'connecting' ? 'Connecting...' : 'Reconnecting...'}`;
+                    // Don't hide QR modal here - let it stay visible
+                    break;
+                case 'failed':
+                    statusDot.classList.add('bg-red-500');
+                    statusText.textContent = 'WhatsApp: Connection Failed';
+                    // Keep modal closed on failure; user can click Connect again
+                    if (qrTimeout) clearTimeout(qrTimeout);
+                    qrModalVisible = false;
+                    break;
+                default:
+                    statusDot.classList.add('bg-gray-500');
+                    statusText.textContent = 'WhatsApp: Disconnected';
+                    // Don't hide QR modal here - let it stay visible if QR is present
+                    break;
+            }
+        }
+
+        // Function to show QR code
+        function showQRCode(qrCode) {
+            const qrContainer = document.getElementById('qrCode');
+            if (!qrCode) return;
+            lastQR = qrCode;
+            qrContainer.innerHTML = '';
+            qrContainer.setAttribute('data-qr', qrCode);
+            new QRCode(qrContainer, {
+                text: qrCode,
+                width: 256,
+                height: 256,
+                colorDark: '#000000',
+                colorLight: '#ffffff',
+                correctLevel: QRCode.CorrectLevel.H
+            });
+            document.getElementById('qrModal').classList.remove('hidden');
+            document.getElementById('showQRButton').classList.add('hidden');
+            qrModalVisible = true;
+            if (qrTimeout) clearTimeout(qrTimeout);
+            qrTimeout = setTimeout(() => {
+                document.getElementById('qrModal').classList.add('hidden');
+                document.getElementById('showQRButton').classList.remove('hidden');
+                qrModalVisible = false;
+            }, 60000);
+        }
+
+        // Function to close QR modal
+        function closeQRModal() {
+            const modal = document.getElementById('qrModal');
+            modal.classList.add('hidden');
+            document.getElementById('showQRButton').classList.remove('hidden');
+            qrModalVisible = false;
+        }
+
+        function requestQR() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ action: 'request_whatsapp_qr' }));
+            }
+        }
+
+        // Function to check connection status
+        async function checkConnectionStatus() {
+            try {
+                const response = await fetch('/api/whatsapp/status');
+                const data = await response.json();
+                
+                if (data.success) {
+                    updateWhatsAppStatus(data.status);
+                }
+            } catch (error) {
+                console.error('Error checking connection status:', error);
+            }
+        }
+
+        // Function to connect WhatsApp
+        async function connectWhatsApp() {
+            try {
+                const response = await fetch('/api/whatsapp/connect', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    updateWhatsAppStatus(data.status);
+                    // Immediately open QR modal and request a fresh QR
+                    document.getElementById('qrModal').classList.remove('hidden');
+                    qrModalVisible = true;
+                    requestQR();
+                    // Start checking connection status more frequently
+                    if (connectionCheckInterval) {
+                        clearInterval(connectionCheckInterval);
+                    }
+                    connectionCheckInterval = setInterval(checkConnectionStatus, 250);
+                } else {
+                    alert('Failed to connect: ' + data.error);
+                }
+            } catch (error) {
+                console.error('Error connecting WhatsApp:', error);
+                alert('Failed to connect. Please try again.');
+            }
+        }
+
+        // Function to disconnect WhatsApp
+        async function disconnectWhatsApp() {
+            try {
+                const response = await fetch('/api/whatsapp/disconnect', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    updateWhatsAppStatus({ status: 'disconnected' });
+                    clearInterval(connectionCheckInterval);
+                } else {
+                    alert('Failed to disconnect: ' + data.error);
+                }
+            } catch (error) {
+                console.error('Error disconnecting WhatsApp:', error);
+                alert('Failed to disconnect. Please try again.');
+            }
+        }
+
+        // Function to update printer status
+        function updatePrinterStatus(status) {
+            const container = document.getElementById('printerStatus');
+            container.innerHTML = '';
+
+            if (status.error) {
+                container.innerHTML = `
+                    <div class="col-span-2 p-4 bg-red-50 border border-red-200 rounded-lg">
+                        <p class="text-red-600">${status.message || 'Error loading printer status'}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const statusElement = document.createElement('div');
+            statusElement.className = 'col-span-2 border rounded-lg p-4';
+            statusElement.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-medium">${status.name || 'Default Printer'}</h3>
+                        <p class="text-sm text-gray-500">${status.message || 'Status: ' + status.status}</p>
+                    </div>
+                    <div class="flex items-center">
+                        <div class="w-3 h-3 rounded-full mr-2 ${status.status === 'ready' ? 'bg-green-500' : 'bg-red-500'}"></div>
+                        <span class="text-sm font-medium">${status.status}</span>
+                    </div>
+                </div>
+                ${status.details ? `<p class="text-sm text-gray-500 mt-2">Details: ${status.details}</p>` : ''}
+            `;
+            container.appendChild(statusElement);
+        }
+
+        // Function to update print jobs
+        function updatePrintJobs(jobs) {
+            const container = document.getElementById('printJobs');
+            container.innerHTML = '';
+
+            if (!jobs || jobs.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-center">No print jobs</p>';
+                return;
+            }
+
+            jobs.forEach(job => {
+                const jobElement = document.createElement('div');
+                jobElement.className = 'border rounded-lg p-4';
+                jobElement.innerHTML = `
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h3 class="font-medium">Job #${job.id}</h3>
+                            <p class="text-sm text-gray-500">Created: ${new Date(job.createdAt).toLocaleString()}</p>
+                            ${job.batchKey && job.batchKey !== 'N/A' ? `<p class="text-sm text-blue-600">Batch: ${job.batchKey}</p>` : ''}
+                            ${job.data && job.data.fileName ? `<p class="text-sm text-gray-600">File: ${job.data.fileName}</p>` : ''}
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <span class="status-badge status-${job.status}">${job.status}</span>
+                            ${job.status === 'queued' || job.status === 'processing' ? 
+                                `<button onclick="cancelJob('${job.id}')" class="px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-xs">Cancel</button>` : 
+                                ''}
+                            ${job.status === 'failed' ? 
+                                `<button onclick="retryJob('${job.id}')" class="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs">Retry</button>` : 
+                                ''}
+                        </div>
+                    </div>
+                    <div class="mt-2">
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                            <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: ${job.progress}%"></div>
+                        </div>
+                        <div class="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>Progress: ${job.progress}%</span>
+                            <span>Updated: ${new Date(job.updatedAt).toLocaleTimeString()}</span>
+                        </div>
+                    </div>
+                    ${job.error ? `<div class="mt-2 p-2 bg-red-50 border border-red-200 rounded"><p class="text-sm text-red-600">Error: ${job.error}</p></div>` : ''}
+                    ${job.result ? `<div class="mt-2 p-2 bg-green-50 border border-green-200 rounded"><p class="text-sm text-green-600">Result: ${job.result}</p></div>` : ''}
+                `;
+                container.appendChild(jobElement);
+            });
+        }
+
+        // Function to update recent documents
+        function updateRecentDocuments(documents) {
+            const container = document.getElementById('recentDocuments');
+            container.innerHTML = '';
+
+            if (!documents || documents.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-center">No recent documents</p>';
+                return;
+            }
+
+            documents.forEach(doc => {
+                const docElement = document.createElement('div');
+                docElement.className = 'border rounded-lg p-4';
+                docElement.innerHTML = `
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h3 class="font-medium">${doc.fileName}</h3>
+                            <p class="text-sm text-gray-500">Received: ${new Date(doc.timestamp).toLocaleString()}</p>
+                            <p class="text-sm text-gray-500">Size: ${formatFileSize(doc.size)}</p>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(docElement);
+            });
+        }
+
+        // Helper function to format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Function to poll for updates
+        async function pollUpdates() {
+            try {
+                // Get printer status
+                const printerResponse = await fetch('/api/printer/status');
+                const printerStatus = await printerResponse.json();
+                updatePrinterStatus(printerStatus);
+
+                // Get print jobs
+                const jobsResponse = await fetch('/api/queue');
+                const jobsData = await jobsResponse.json();
+                updatePrintJobs(jobsData.jobs);
+
+                // Get recent documents
+                const docsResponse = await fetch('/api/documents/recent');
+                const docsData = await docsResponse.json();
+                updateRecentDocuments(docsData);
+
+                // Get WhatsApp status
+                const whatsappResponse = await fetch('/api/whatsapp/status');
+                const whatsappStatus = await whatsappResponse.json();
+                updateWhatsAppStatus(whatsappStatus);
+            } catch (error) {
+                console.error('Error polling updates:', error);
+            }
+        }
+
+        // Job action functions
+        async function cancelJob(jobId) {
+            try {
+                const response = await fetch(`/api/queue/job/${jobId}`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showNotification('Job cancelled successfully', 'success');
+                    pollUpdates(); // Refresh the display
+                } else {
+                    showNotification('Failed to cancel job: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showNotification('Error cancelling job: ' + error.message, 'error');
+            }
+        }
+
+        async function retryJob(jobId) {
+            try {
+                const response = await fetch(`/api/queue/job/${jobId}/retry`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showNotification('Job retried successfully', 'success');
+                    pollUpdates(); // Refresh the display
+                } else {
+                    showNotification('Failed to retry job: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showNotification('Error retrying job: ' + error.message, 'error');
+            }
+        }
+
+        // Notification system
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
+                type === 'success' ? 'bg-green-500 text-white' :
+                type === 'error' ? 'bg-red-500 text-white' :
+                'bg-blue-500 text-white'
+            }`;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.remove();
+            }, 5000);
+        }
+
+        // Additional utility functions
+        async function refreshJobs() {
+            showNotification('Refreshing jobs...', 'info');
+            await pollUpdates();
+        }
+
+        async function clearCompletedJobs() {
+            try {
+                const response = await fetch('/api/queue/clear-completed', {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showNotification('Completed jobs cleared', 'success');
+                    pollUpdates();
+                } else {
+                    showNotification('Failed to clear completed jobs: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showNotification('Error clearing completed jobs: ' + error.message, 'error');
+            }
+        }
+
+        // Enhanced polling with error handling
+        let pollErrorCount = 0;
+        const maxPollErrors = 3;
+
+        async function pollUpdatesWithErrorHandling() {
+            try {
+                await pollUpdates();
+                pollErrorCount = 0; // Reset error count on success
+            } catch (error) {
+                pollErrorCount++;
+                console.error('Polling error:', error);
+                
+                if (pollErrorCount >= maxPollErrors) {
+                    showNotification('Connection issues detected. Please refresh the page.', 'error');
+                    // Reduce polling frequency when there are persistent errors
+                    clearInterval(pollInterval);
+                    pollInterval = setInterval(pollUpdatesWithErrorHandling, 15000);
+                }
+            }
+        }
+
+        // Start polling for updates with error handling
+        let pollInterval = setInterval(pollUpdatesWithErrorHandling, 5000);
+        pollUpdatesWithErrorHandling();
+
+        // Initialize connection status check
+        checkConnectionStatus();
+
+        // Task Management Functions
+        function addNewTask() {
+            const taskForm = document.getElementById('taskForm');
+            const taskInput = document.getElementById('taskInput');
+            taskForm.classList.remove('hidden');
+            taskInput.focus();
+        }
+
+        function cancelTask() {
+            const taskForm = document.getElementById('taskForm');
+            const taskInput = document.getElementById('taskInput');
+            const taskPriority = document.getElementById('taskPriority');
+            
+            taskForm.classList.add('hidden');
+            taskInput.value = '';
+            taskPriority.value = 'medium';
+        }
+
+        function saveTask() {
+            const taskInput = document.getElementById('taskInput');
+            const taskPriority = document.getElementById('taskPriority');
+            const description = taskInput.value.trim();
+            
+            if (!description) {
+                showNotification('Please enter a task description', 'error');
+                return;
+            }
+            
+            const newTask = {
+                id: taskIdCounter++,
+                description: description,
+                priority: taskPriority.value,
+                status: 'pending',
+                createdAt: new Date().toISOString(),
+                completedAt: null
+            };
+            
+            tasks.push(newTask);
+            saveTasks();
+            cancelTask();
+            renderTasks();
+            updateTaskStats();
+            showNotification('Task added successfully', 'success');
+        }
+
+        function toggleTask(taskId) {
+            const task = tasks.find(t => t.id === taskId);
+            if (task) {
+                task.status = task.status === 'pending' ? 'completed' : 'pending';
+                task.completedAt = task.status === 'completed' ? new Date().toISOString() : null;
+                saveTasks();
+                renderTasks();
+                updateTaskStats();
+                showNotification(`Task ${task.status === 'completed' ? 'completed' : 'reopened'}`, 'success');
+            }
+        }
+
+        function deleteTask(taskId) {
+            if (confirm('Are you sure you want to delete this task?')) {
+                tasks = tasks.filter(t => t.id !== taskId);
+                saveTasks();
+                renderTasks();
+                updateTaskStats();
+                showNotification('Task deleted', 'success');
+            }
+        }
+
+        function editTask(taskId) {
+            const task = tasks.find(t => t.id === taskId);
+            if (task) {
+                const newDescription = prompt('Edit task description:', task.description);
+                if (newDescription && newDescription.trim()) {
+                    task.description = newDescription.trim();
+                    saveTasks();
+                    renderTasks();
+                    showNotification('Task updated', 'success');
+                }
+            }
+        }
+
+        function filterTasks(filter) {
+            currentFilter = filter;
+            
+            // Update filter button styles
+            document.querySelectorAll('.task-filter').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.querySelector(`[data-filter="${filter}"]`).classList.add('active');
+            
+            renderTasks();
+        }
+
+        function getFilteredTasks() {
+            switch (currentFilter) {
+                case 'pending':
+                    return tasks.filter(t => t.status === 'pending');
+                case 'completed':
+                    return tasks.filter(t => t.status === 'completed');
+                case 'high':
+                    return tasks.filter(t => t.priority === 'high');
+                default:
+                    return tasks;
+            }
+        }
+
+        function renderTasks() {
+            const taskList = document.getElementById('taskList');
+            const filteredTasks = getFilteredTasks();
+            
+            if (filteredTasks.length === 0) {
+                taskList.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <svg class="w-12 h-12 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                        </svg>
+                        <p>No tasks found</p>
+                        <p class="text-sm mt-1">${currentFilter === 'all' ? 'Add your first task to get started' : `No ${currentFilter} tasks`}</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            taskList.innerHTML = filteredTasks.map(task => {
+                const priorityClass = `task-priority-${task.priority}`;
+                const completedClass = task.status === 'completed' ? 'completed' : '';
+                const priorityBadge = {
+                    high: '<span class="status-badge bg-red-100 text-red-800">High</span>',
+                    medium: '<span class="status-badge bg-yellow-100 text-yellow-800">Medium</span>',
+                    low: '<span class="status-badge bg-green-100 text-green-800">Low</span>'
+                }[task.priority];
+                
+                return `
+                    <div class="task-item ${priorityClass} ${completedClass}">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-3 flex-1">
+                                <input type="checkbox" ${task.status === 'completed' ? 'checked' : ''} 
+                                       onchange="toggleTask(${task.id})" 
+                                       class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500">
+                                <div class="flex-1">
+                                    <p class="${task.status === 'completed' ? 'line-through text-gray-500' : 'text-gray-900'}">
+                                        ${task.description}
+                                    </p>
+                                    <div class="flex items-center space-x-2 mt-1">
+                                        ${priorityBadge}
+                                        <span class="text-xs text-gray-500">
+                                            Created: ${new Date(task.createdAt).toLocaleDateString()}
+                                        </span>
+                                        ${task.completedAt ? `
+                                            <span class="text-xs text-gray-500">
+                                                Completed: ${new Date(task.completedAt).toLocaleDateString()}
+                                            </span>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex space-x-2">
+                                <button onclick="editTask(${task.id})" 
+                                        class="p-1 text-blue-600 hover:text-blue-800" title="Edit">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                                    </svg>
+                                </button>
+                                <button onclick="deleteTask(${task.id})" 
+                                        class="p-1 text-red-600 hover:text-red-800" title="Delete">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updateTaskStats() {
+            const totalTasks = tasks.length;
+            const pendingTasks = tasks.filter(t => t.status === 'pending').length;
+            const completedTasks = tasks.filter(t => t.status === 'completed').length;
+            
+            document.getElementById('totalTasks').textContent = totalTasks;
+            document.getElementById('pendingTasks').textContent = pendingTasks;
+            document.getElementById('completedTasks').textContent = completedTasks;
+        }
+
+        function saveTasks() {
+            localStorage.setItem('photocopy_tasks', JSON.stringify(tasks));
+            localStorage.setItem('task_id_counter', taskIdCounter.toString());
+        }
+
+        function initializeTasks() {
+            renderTasks();
+            updateTaskStats();
+        }
+
+        // Add keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey || e.metaKey) {
+                switch(e.key) {
+                    case 'r':
+                        e.preventDefault();
+                        refreshJobs();
+                        break;
+                    case 'q':
+                        e.preventDefault();
+                        if (document.getElementById('qrModal').classList.contains('hidden')) {
+                            requestQR();
+                        } else {
+                            closeQRModal();
+                        }
+                        break;
+                    case 't':
+                        e.preventDefault();
+                        addNewTask();
+                        break;
+                    case 'f':
+                        e.preventDefault();
+                        const currentFilters = ['all', 'pending', 'completed', 'high'];
+                        const currentIndex = currentFilters.indexOf(currentFilter);
+                        const nextFilter = currentFilters[(currentIndex + 1) % currentFilters.length];
+                        filterTasks(nextFilter);
+                        break;
+                }
+            }
+        });
+    </script>
+</body>
+</html> 

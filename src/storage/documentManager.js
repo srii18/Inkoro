@@ -1,10 +1,11 @@
 const fs = require('fs').promises;
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
-
+const { randomUUID } = require('crypto');
+const config = require('../../config');
 class DocumentManager {
     constructor() {
-        this.storageDir = path.join(__dirname, '../../storage/documents');
+        const baseStorage = path.isAbsolute(config.storagePath) ? config.storagePath : path.join(process.cwd(), config.storagePath);
+        this.storageDir = path.join(baseStorage, 'documents');
         this.ensureStorageDir();
     }
 
@@ -18,12 +19,16 @@ class DocumentManager {
 
     async saveDocument(buffer, originalName) {
         try {
-            const fileId = uuidv4();
+            const fileId = randomUUID();
             const extension = path.extname(originalName);
             const fileName = `${fileId}${extension}`;
             const filePath = path.join(this.storageDir, fileName);
 
             await fs.writeFile(filePath, buffer);
+
+            // Save metadata with originalName
+            const metaPath = path.join(this.storageDir, `${fileId}.json`);
+            await fs.writeFile(metaPath, JSON.stringify({ originalName }, null, 2));
 
             return {
                 fileId,
@@ -77,12 +82,21 @@ class DocumentManager {
         try {
             const files = await fs.readdir(this.storageDir);
             const documents = await Promise.all(
-                files.map(async (fileName) => {
+                files.filter(f => !f.endsWith('.json')).map(async (fileName) => {
                     const filePath = path.join(this.storageDir, fileName);
                     const stats = await fs.stat(filePath);
+                    const fileId = fileName.split('.')[0];
+                    // Try to read metadata for originalName
+                    let originalName = fileName;
+                    try {
+                        const metaPath = path.join(this.storageDir, `${fileId}.json`);
+                        const meta = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+                        if (meta.originalName) originalName = meta.originalName;
+                    } catch {}
                     return {
-                        fileId: fileName.split('.')[0],
+                        fileId,
                         fileName,
+                        originalName,
                         filePath,
                         timestamp: stats.mtime.toISOString(),
                         size: stats.size
@@ -99,6 +113,19 @@ class DocumentManager {
             throw error;
         }
     }
+
+    async clearAllDocuments() {
+        try {
+            const files = await fs.readdir(this.storageDir);
+            for (const file of files) {
+                await fs.unlink(path.join(this.storageDir, file));
+            }
+        } catch (error) {
+            console.error('Error clearing all documents:', error.message);
+            throw error;
+        }
+    }
 }
 
 module.exports = new DocumentManager(); 
+

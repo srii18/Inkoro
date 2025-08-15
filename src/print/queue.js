@@ -74,7 +74,8 @@ class PrintQueue extends EventEmitter {
             estimatedPages: this.estimatePages(job),
             createdAt: new Date().toISOString(),
             progress: 0,
-            ...job
+            ...job,
+            sender: job.sender || (job.data && job.data.sender) || null
         };
 
         this.queue.push(queueItem);
@@ -247,6 +248,19 @@ class PrintQueue extends EventEmitter {
 
         await this.saveQueue();
         this.emit('statusUpdated', { jobId, status: 'removed' });
+        this.emit('updated', this.queue, this.getStats());
+        return job;
+    }
+
+    async acceptJob(jobId, acceptedBy = null) {
+        const job = this.queue.find(j => j.id === jobId);
+        if (!job) throw new Error('Job not found');
+        if (job.status !== 'pending' && job.status !== 'queued') throw new Error('Only pending or queued jobs can be accepted');
+        job.status = 'processing';
+        job.acceptedBy = acceptedBy;
+        job.updatedAt = new Date().toISOString();
+        await this.saveQueue();
+        this.emit('statusUpdated', { jobId: job.id, status: job.status });
         this.emit('updated', this.queue, this.getStats());
         return job;
     }

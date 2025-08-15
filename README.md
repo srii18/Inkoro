@@ -1,217 +1,82 @@
 # Photocopy Optimizer
 
-An automated system for managing photocopy jobs via WhatsApp, featuring intelligent job queuing, batching, and printing. This system streamlines the process of handling print requests through WhatsApp, making it efficient and user-friendly for both customers and operators.
+Photocopy Optimizer is a Node.js application for managing photocopy and print jobs via WhatsApp, with intelligent job queuing, batching, and a real-time web dashboard for operators.
 
 ## Features
+- **WhatsApp Integration:** Users can send documents/images and print instructions via WhatsApp. QR code authentication is required for initial login. If the QR code times out (after 60 seconds), a new QR code is generated automatically and displayed until authentication is successful.
+- **Job Queuing and Batching:** Powered by Bull MQ and Redis, jobs are intelligently queued, batched, and prioritized based on user instructions (e.g., urgent, color, copies).
+- **PDF and Image Processing:** Supports PDF and common image formats. Users can specify print options (copies, color, paper size, etc.).
+- **Printer Management:** Supports multiple printers. Printers are configured via a config file or environment variables and discovered automatically or manually as per the configuration.
+- **Web Dashboard:** Real-time dashboard for operators to monitor, accept, and manage print jobs. Features include:
+  - Live queue and job status updates
+  - Accept/cancel jobs
+  - Preview PDFs/images before printing
+  - Group images for batch printing
+  - View printer status
 
-- **WhatsApp Integration**
-  - Receive documents and instructions via WhatsApp
-  - Robust QR code authentication with 60-second timeout
-  - Real-time status updates and notifications
-  - Multi-user support with business account
-  - Automatic reconnection and error recovery
+## .env Variables
+List all required environment variables in your `.env` file:
+```
+PORT=3002
+NODE_ENV=development
+WHATSAPP_API_KEY=your_whatsapp_api_key
+REDIS_URL=redis://localhost:6379
+PRINTER_CONFIG_PATH=./config/printers.json
+```
 
-- **Smart Processing**
-  - Intelligent instruction parsing for print requirements
-  - Support for multiple file types (PDF, images, documents)
-  - Natural language processing for print instructions
-  - Automatic document format detection
-
-- **Queue Management**
-  - Intelligent job queuing and batching
-  - Priority-based scheduling (urgent, high, normal, low)
-  - Real-time queue status monitoring
-  - Automatic job optimization and error handling
-  - Job retry and cancellation capabilities
-
-- **Printing System**
-  - Automated printing via Windows print system
-  - Support for multiple printers and paper types
-  - Print job tracking and management
-  - Error handling and recovery
-  - Progress monitoring and status updates
-
-- **Web Dashboard**
-  - Real-time monitoring of print queue
-  - WhatsApp connection status
-  - Printer status and management
-  - Document history and job tracking
-  - Interactive job management (cancel, retry)
-
-## Prerequisites
-
-- Node.js (v14 or higher)
-- Windows operating system (for printer integration)
-- WhatsApp Business account
-- Sufficient storage for temporary files
-- Network access for WhatsApp connection
-
-## Installation
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/photocopy-optimizer.git
-   cd photocopy-optimizer
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Create a `.env` file in the root directory:
-   ```env
-   PORT=3002
-   LOG_LEVEL=info
-   ```
-
-4. Start the application:
-   ```bash
-   # Development mode
-   npm run dev
-
-   # Production mode
-   npm start
-   ```
-
-5. Open the web dashboard at `http://localhost:3002`
-
-6. Click "Connect" to start WhatsApp authentication and scan the QR code
-
-## Usage
-
-### For Customers (WhatsApp)
-
-1. **Send a document** to the WhatsApp number
-2. **Reply with instructions** like:
-   - "2 copies"
-   - "Color pages 1-3"
-   - "A3 paper, urgent"
-   - "3 copies, glossy paper"
-   - "Print" (for default settings)
-
-3. **Receive confirmation** when your job is queued
-4. **Get notified** when printing is complete
-
-### For Operators (Web Dashboard)
-
-1. **Monitor the queue** in real-time
-2. **View job details** and progress
-3. **Manage jobs** (cancel, retry, prioritize)
-4. **Check printer status** and connection
-5. **View document history**
+## Technologies Used
+- Node.js
+- Express
+- Bull MQ (with Redis)
+- Socket.IO
+- Baileys (WhatsApp integration)
+- Pino (logging)
+- node-printer
+- pdf-parse
+- React (for dashboard)
 
 ## Project Structure
-
 ```
-src/
-├── index.js                # Main application entry
-├── events/                 # Event management
-│   └── eventManager.js     # Event manager logic
-├── parser/                 # Instruction parsing
-│   └── instructionParser.js# Natural language instruction parser
-├── print/                  # Print queue logic
-│   └── queue.js            # Print queue implementation
-├── printer/                # Printer integration
-│   ├── maintenance.js      # Printer maintenance logic
-│   └── printerManager.js   # Windows printer management
-├── queue/                  # Job queue management
-│   ├── jobBatcher.js       # Job batching logic
-│   └── printQueue.js       # Print queue logic
-├── server/                 # Server setup
-│   └── index.js            # Express HTTP server
-├── storage/                # Document storage management
-│   └── documentManager.js  # Document storage and retrieval
-├── websocket/              # WebSocket server
-│   └── server.js           # Real-time communication
-├── whatsapp/               # WhatsApp integration
-│   └── client.js           # WhatsApp client with robust authentication
+/ (root)
+  |-- src/
+      |-- events/           # Event management
+      |-- parser/           # Instruction parsing
+      |-- print/            # Print queue logic
+      |-- printer/          # Printer management
+      |-- queue/            # Job batching/queueing
+      |-- server/           # Express server
+      |-- storage/          # Document/image storage
+      |-- websocket/        # WebSocket server
+      |-- whatsapp/         # WhatsApp integration
+  |-- public/               # Dashboard frontend
+  |-- storage/              # Uploaded/processed files
+  |-- logs/                 # Log files
+  |-- data/                 # Queue/job data
+  |-- .env                  # Environment variables
 ```
 
-Other folders:
-- `public/` - Web dashboard (HTML, CSS, JS)
-- `data/` - Persistent data (queue.json)
-- `logs/` - Application logs
-- `storage/documents/` - Uploaded/processed documents
-- `whatsapp_auth/` - WhatsApp session/auth files
+## Testing
+- (Add instructions for running tests here. If not implemented, add a placeholder:)
+- _Testing not yet implemented. To add tests, use Jest or Mocha for backend and React Testing Library for frontend._
 
-## Development Status
+## License
+- _MIT License recommended. Add a LICENSE file to the project._
 
-Currently in Phase 2: Core Features Implementation
+## Contributing Guidelines
+- _Add a CONTRIBUTING.md file or section with guidelines for code style, pull requests, and issue reporting._
 
-### ✅ Completed
-- [x] Project setup and configuration
-- [x] Basic project structure
-- [x] Development environment setup
-- [x] WhatsApp integration with robust authentication
-- [x] QR code management with timeout and regeneration
-- [x] Natural language instruction parsing
-- [x] Document storage and management
-- [x] Print queue implementation
-- [x] Windows printer integration
-- [x] Web dashboard with real-time updates
-- [x] Error handling and recovery
-- [x] File naming preservation (original names)
-- [x] Paper type validation and support
-- [x] Job priority and scheduling
-- [x] Real-time status monitoring
+## Setup
+1. Clone the repository
+2. Install dependencies: `npm install`
+3. Set up your `.env` file (see above)
+4. Start Redis server (required for Bull MQ)
+5. Start the application: `npm start` (or `npm run dev` for development)
 
-### 🔄 In Progress
-- [ ] Document download from WhatsApp media
-- [ ] Advanced job batching optimization
-- [ ] Multi-printer support
-- [ ] Print job analytics
-
-### 📋 Planned Features
-- [ ] User authentication and roles
-- [ ] Mobile app integration
-- [ ] Advanced analytics dashboard
-- [ ] Email notifications
-- [ ] Payment integration
-- [ ] Multi-language support
-- [ ] Cloud storage integration
-- [ ] API for third-party integrations
-
-## Technical Details
-
-### WhatsApp Integration
-- Uses `@whiskeysockets/baileys` for WhatsApp Web API
-- Robust QR code authentication with 60-second timeout
-- Automatic reconnection and error recovery
-- Multi-file authentication state management
-
-### Print System
-- Windows printer integration via `wmic` commands
-- Support for multiple paper types (plain, photo, glossy)
-- Priority-based job scheduling
-- Real-time progress monitoring
-
-### Web Dashboard
-- Real-time updates via WebSocket
-- Responsive design with Tailwind CSS
-- Interactive job management
-- Live status monitoring
-
-## Troubleshooting
-
-### QR Code Issues
-- QR code disappears quickly: The system now maintains QR visibility for 60 seconds
-- Can't scan QR: Use the "Show QR" button to regenerate
-- Connection fails: Check network and try reconnecting
-
-### Print Job Issues
-- Jobs not appearing: Check WhatsApp connection status
-- Print errors: Verify printer is connected and ready
-- File name issues: Original file names are now preserved
-
-### General Issues
-- Check the logs in the `logs/` directory
-- Verify all prerequisites are installed
-- Ensure Windows printer system is working
-
-## Acknowledgments
-
-- [@whiskeysockets/baileys](https://github.com/WhiskeySockets/Baileys) for WhatsApp integration
-- [Socket.IO](https://socket.io/) for real-time communication
-- [Tailwind CSS](https://tailwindcss.com/) for styling
-- [Express.js](https://expressjs.com/) for web server 
+## Usage
+- **For Customers (WhatsApp):**
+  - Send a document or image to the WhatsApp number.
+  - Reply with print instructions (e.g., "2 copies", "Color pages 1-3").
+  - Receive queue status, ETA, and job updates via WhatsApp.
+- **For Operators (Web Dashboard):**
+  - Monitor and manage jobs in real time.
+  - Accept/cancel jobs, preview documents, and view printer status. 

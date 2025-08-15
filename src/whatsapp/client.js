@@ -1,7 +1,8 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const path = require('path');
+const config = require('../../config');
 const { EventEmitter } = require('events');
 const qrcode = require('qrcode-terminal');
 const pino = require('pino');
@@ -31,7 +32,10 @@ class WhatsAppClient extends EventEmitter {
         this.qrTimestamp = null;
         this.qrTimeoutMs = 60000; // 60 seconds
         this.connectionStatus = 'disconnected';
-        this.authFolder = path.join(process.cwd(), 'whatsapp_auth');
+        // Resolve auth folder from config (env-backed) with absolute path
+        this.authFolder = path.isAbsolute(config.whatsappAuthPath)
+            ? config.whatsappAuthPath
+            : path.join(process.cwd(), config.whatsappAuthPath);
         this.initializeAuthFolder();
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 3;
@@ -39,6 +43,13 @@ class WhatsAppClient extends EventEmitter {
         this.isConnecting = false;
         this.pendingJobs = new Map();
         this.qrTimeoutHandle = null;
+        // Add per-user session state
+        this.userSessions = new Map(); // { [jid]: { active: bool, timeout: NodeJS.Timeout|null } }
+        this.CODE_MESSAGE = 'hi'; // code to start sequence
+        this.EXIT_MESSAGE = 'exit'; // code to exit sequence
+        this.SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+        this.imageBatchBuffer = new Map(); // { [jid]: { images: [], timer: NodeJS.Timeout|null } }
+        this.IMAGE_BATCH_WINDOW_MS = 60 * 1000; // 1 minute
     }
 
     initializeAuthFolder() {
@@ -53,10 +64,17 @@ class WhatsAppClient extends EventEmitter {
     }
 
     async forceQR() {
-        // Disconnect and reconnect to force a new QR
-        if (this.client) {
-            await this.disconnect();
-        }
+        // Force a fresh QR by clearing auth state and reconnecting
+        try {
+            if (this.client) {
+                await this.disconnect();
+            }
+            await this.clearAuthState();
+            this.connectionStatus = 'connecting';
+            this.isConnecting = true;
+            this.isConnected = false;
+            this.emit('statusChange', this.connectionStatus);
+        } catch (_) {}
         await this.connect();
     }
 
@@ -75,7 +93,7 @@ class WhatsAppClient extends EventEmitter {
             this.client = makeWASocket({
                 auth: state,
                 printQRInTerminal: false,
-                browser: ['Photocopy Optimizer', 'Chrome', '1.0.0'],
+                browser: ['Inkoro', 'Chrome', '1.0.0'],
                 logger: logger,
                 connectTimeoutMs: 120000,
                 defaultQueryTimeoutMs: 120000,
@@ -155,6 +173,9 @@ class WhatsAppClient extends EventEmitter {
                         this.emit('statusChange', this.connectionStatus);
                         this.isConnected = false;
                         this.isConnecting = false;
+                        // Clear auth state so next attempt will produce a QR
+                        try { await this.clearAuthState(); } catch {}
+                        this.reconnectAttempts = 0;
                         setTimeout(() => this.connect(), 15000);
                         return;
                     }
@@ -219,7 +240,25 @@ class WhatsAppClient extends EventEmitter {
     async disconnect() {
         try {
             if (this.client) {
-                await this.client.logout();
+                // Detach error listeners to avoid unhandled 'error' events during logout
+                try {
+                    const ws = this.client.ws;
+                    if (ws && typeof ws.removeAllListeners === 'function') {
+                        ws.removeAllListeners('error');
+                    }
+                } catch (_) {}
+
+                // Only attempt logout if WS is OPEN; otherwise skip to cleanup
+                try {
+                    const ws = this.client.ws;
+                    const OPEN = 1;
+                    if (ws && ws.readyState === OPEN && typeof this.client.logout === 'function') {
+                        await this.client.logout();
+                    }
+                } catch (e) {
+                    console.warn('Logout encountered an error (ignored):', e?.message || e);
+                }
+
                 this.client = null;
                 this.isConnected = false;
                 this.connectionStatus = 'disconnected';
@@ -251,6 +290,13 @@ class WhatsAppClient extends EventEmitter {
         try {
             const messageContent = message.message;
             if (!messageContent) return;
+
+            // Only process personal chats
+            const remoteJid = message.key.remoteJid;
+            if (!remoteJid || !remoteJid.endsWith('@s.whatsapp.net')) {
+                // Ignore group, community, or broadcast messages
+                return;
+            }
 
             // Handle document messages
             if (messageContent.documentMessage) {
@@ -345,20 +391,74 @@ class WhatsAppClient extends EventEmitter {
         try {
             const instructionParser = require('../parser/instructionParser');
             const documentManager = require('../storage/documentManager');
-            const text = message.message.conversation || message.message.extendedTextMessage?.text;
+            const printQueue = require('../print/queue');
+            const text = (message.message.conversation || message.message.extendedTextMessage?.text || '').trim().toLowerCase();
             const sender = message.key.remoteJid;
-            
             if (!text) return;
-
             console.log(`💬 Text message received: ${text} from ${sender}`);
 
-            // Check if this is a reply to a previous document
+            // Cancel job command
+            if (text === 'cancel job') {
+                // Find the user's most recent pending job
+                const queue = printQueue.queue || [];
+                const userJob = queue.find(j => j.sender === sender && (j.status === 'pending' || j.status === 'queued'));
+                if (userJob) {
+                    await printQueue.removeJob(userJob.id);
+                    await this.sendMessage(sender, '❌ Your print job has been cancelled.');
+                } else {
+                    await this.sendMessage(sender, 'No pending print job found to cancel.');
+                }
+                return;
+            }
+
+            // Session state logic
+            let session = this.userSessions.get(sender);
+            if (!session) {
+                session = { active: false, timeout: null };
+                this.userSessions.set(sender, session);
+            }
+            // Always reset timeout on any message
+            if (session.timeout) clearTimeout(session.timeout);
+            session.timeout = setTimeout(() => {
+                session.active = false;
+                this.userSessions.set(sender, session);
+                this.sendMessage(sender, '⏳ Session timed out. Please type "hi" to start again.');
+            }, this.SESSION_TIMEOUT_MS);
+
+            // Exit message
+            if (text === this.EXIT_MESSAGE) {
+                session.active = false;
+                this.userSessions.set(sender, session);
+                await this.sendMessage(sender, '👋 Session ended. Type "hi" to start again.');
+                return;
+            }
+            // Code message to start sequence
+            if (!session.active) {
+                if (text === this.CODE_MESSAGE) {
+                    session.active = true;
+                    this.userSessions.set(sender, session);
+                    await this.sendMessage(sender,
+                        '👋 Welcome to Inkoro (your friendly photocopy optimizer)!\n\n' +
+                        '📄 Send me a document to print\n' +
+                        '💬 Or reply to a document with instructions like:\n' +
+                        '• "2 copies"\n' +
+                        '• "Color pages 1-3"\n' +
+                        '• "A3 paper, urgent"\n' +
+                        '• "3 copies, glossy paper"\n\n' +
+                        '🆘 Need help? Just ask!\nType "exit" anytime to end this session.'
+                    );
+                } else {
+                    // Only respond to code message, ignore other texts
+                    // Optionally, you can send a minimal prompt:
+                    // await this.sendMessage(sender, 'Type "hi" to start Inkoro.');
+                }
+                return;
+            }
+            // If session is active, proceed as before
             const pendingJob = this.getPendingJob(sender);
-            
             if (pendingJob) {
                 // Parse instructions from text
                 const instructions = instructionParser.parse(text);
-                
                 // Update the pending job with instructions
                 const updatedJob = {
                     ...pendingJob,
@@ -367,10 +467,8 @@ class WhatsAppClient extends EventEmitter {
                         ...instructions
                     }
                 };
-
                 // The document should already be downloaded and saved when the pending job was created
                 // We just need to update the instructions and create the print job
-                
                 // Create final print job with the file already saved
                 const printJob = {
                     ...updatedJob,
@@ -379,10 +477,8 @@ class WhatsAppClient extends EventEmitter {
                         ...instructions
                     }
                 };
-
                 // Emit print job event
                 this.emit('printJob', printJob);
-                
                 // Send confirmation
                 await this.sendMessage(sender, 
                     `✅ Print job created!\n\n` +
@@ -391,23 +487,62 @@ class WhatsAppClient extends EventEmitter {
                     `📏 Paper: ${printJob.instructions.paperSize.toUpperCase()}\n` +
                     `🎨 Color pages: ${printJob.instructions.colorPages.length > 0 ? printJob.instructions.colorPages.join(', ') : 'None'}\n` +
                     `⏰ Priority: ${printJob.instructions.priority}\n\n` +
-                    `🖨️ Your job is now in the print queue. You'll be notified when it's ready!`
+                    `🖨️ Your job is now in the print queue.\n` +
+                    await this.getQueueMessage(sender, printJob)
                 );
-
                 // Remove from pending jobs
                 this.removePendingJob(sender);
             } else {
-                // No pending job, send help message
+                // No pending job, prompt to send document
                 await this.sendMessage(sender, 
-                    `👋 Welcome to Photocopy Optimizer!\n\n` +
-                    `📄 Send me a document to print\n` +
-                    `💬 Or reply to a document with instructions like:\n` +
-                    `• "2 copies"\n` +
-                    `• "Color pages 1-3"\n` +
-                    `• "A3 paper, urgent"\n` +
-                    `• "3 copies, glossy paper"\n\n` +
-                    `🆘 Need help? Just ask!`
+                    '👋 Welcome to Inkoro (your friendly photocopy optimizer)!\n\n' +
+                    '📄 Send me a document to print\n' +
+                    '💬 Or reply to a document with instructions like:\n' +
+                    '• "2 copies"\n' +
+                    '• "Color pages 1-3"\n' +
+                    '• "A3 paper, urgent"\n' +
+                    '• "3 copies, glossy paper"\n\n' +
+                    '🆘 Need help? Just ask!\nType "exit" anytime to end this session.'
                 );
+            }
+
+            // Handle image batch grouping and preview
+            if (session && session.pendingImageBatch) {
+                // User is responding to image batch prompt
+                const num = parseInt(text);
+                if ([1,2,4,6,8,9,12,16].includes(num)) {
+                    // Create a preview (simulate for now)
+                    // In production, generate a real preview image and send to dashboard
+                    this.emit('imageBatchPreview', { sender, images: session.pendingImageBatch, perPage: num });
+                    await this.sendMessage(sender, `🖼️ Preview sent to dashboard.\nType 'print color' or 'print bw' to print in color or black & white.`);
+                    session.imageBatchPerPage = num;
+                    this.userSessions.set(sender, session);
+                    return;
+                }
+                if (text === 'print color' || text === 'print bw') {
+                    if (session.pendingImageBatch && session.imageBatchPerPage) {
+                        // Create a print job for the batch
+                        const printJob = {
+                            images: session.pendingImageBatch,
+                            sender: sender,
+                            instructions: {
+                                copies: 1,
+                                paperSize: 'a4',
+                                paperType: 'photo',
+                                color: text === 'print color',
+                                perPage: session.imageBatchPerPage,
+                                priority: 'normal'
+                            },
+                            timestamp: new Date().toISOString()
+                        };
+                        this.emit('printJob', printJob);
+                        await this.sendMessage(sender, `✅ Print job created for ${session.pendingImageBatch.length} images (${text === 'print color' ? 'Color' : 'B&W'}).`);
+                        delete session.pendingImageBatch;
+                        delete session.imageBatchPerPage;
+                        this.userSessions.set(sender, session);
+                        return;
+                    }
+                }
             }
 
         } catch (error) {
@@ -439,34 +574,56 @@ class WhatsAppClient extends EventEmitter {
             // Save image to storage
             const savedDoc = await documentManager.saveDocument(imageData.buffer, fileName);
             
-            // Create print job for image
-            const printJob = {
+            // Grouping logic
+            let batch = this.imageBatchBuffer.get(sender);
+            if (!batch) {
+                batch = { images: [], timer: null };
+                this.imageBatchBuffer.set(sender, batch);
+            }
+            batch.images.push({
                 fileId: savedDoc.fileId,
                 fileName: savedDoc.originalName || fileName,
-                sender: sender,
-                instructions: {
-                    copies: 1,
-                    paperSize: 'a4',
-                    paperType: 'photo',
-                    colorPages: [1], // First page in color for images
-                    priority: 'normal'
-                },
+                path: savedDoc.filePath,
                 timestamp: new Date().toISOString(),
-                fileSize: imageData.size
-            };
-
-            // Emit print job event
-            this.emit('printJob', printJob);
-            
-            // Send confirmation
-            await this.sendMessage(sender, 
-                `✅ Image received!\n` +
-                `📊 Size: ${Math.round(imageData.size / 1024)}KB\n` +
-                `📋 Creating photo print job...\n` +
-                `📄 Default: 1 copy, A4 photo paper\n` +
-                `💬 Reply with instructions to customize`
-            );
-
+                size: imageData.size
+            });
+            // Reset timer
+            if (batch.timer) clearTimeout(batch.timer);
+            batch.timer = setTimeout(async () => {
+                // When timer expires, treat as a batch
+                const images = batch.images;
+                this.imageBatchBuffer.delete(sender);
+                if (images.length > 1) {
+                    // Ask user for grouping option
+                    await this.sendMessage(sender,
+                        `📸 You sent ${images.length} images.\nHow many images per page do you want? (1, 2, 4, 6, 8, 9, 12, 16)\nReply with a number.`
+                    );
+                    // Store batch in session for next step
+                    let session = this.userSessions.get(sender) || { active: true };
+                    session.pendingImageBatch = images;
+                    this.userSessions.set(sender, session);
+                } else {
+                    // Single image, proceed as before
+                    const printJob = {
+                        fileId: images[0].fileId,
+                        fileName: images[0].fileName,
+                        sender: sender,
+                        instructions: {
+                            copies: 1,
+                            paperSize: 'a4',
+                            paperType: 'photo',
+                            colorPages: [1],
+                            priority: 'normal'
+                        },
+                        timestamp: images[0].timestamp,
+                        fileSize: images[0].size
+                    };
+                    this.emit('printJob', printJob);
+                    await this.sendMessage(sender,
+                        `✅ Image received!\n📊 Size: ${Math.round(images[0].size / 1024)}KB\n📋 Creating photo print job...\n📄 Default: 1 copy, A4 photo paper\n💬 Reply with instructions to customize`
+                    );
+                }
+            }, this.IMAGE_BATCH_WINDOW_MS);
         } catch (error) {
             console.error('Error handling image message:', error);
             await this.sendMessage(
@@ -499,10 +656,10 @@ class WhatsAppClient extends EventEmitter {
             let buffer;
             if (messageObj) {
                 // Use the full message object for proper media download
-                buffer = await this.client.downloadMediaMessage(messageObj);
+                buffer = await downloadMediaMessage(messageObj, 'buffer', {});
             } else if (url) {
                 // Fallback method if only URL is available
-                buffer = await this.client.downloadMediaMessage({
+                buffer = await downloadMediaMessage({
                     key: { remoteJid: 'status@broadcast' },
                     message: { 
                         documentMessage: { 
@@ -510,7 +667,7 @@ class WhatsAppClient extends EventEmitter {
                             mimetype: this.getMimeType(fileName)
                         } 
                     }
-                });
+                }, 'buffer', {});
             } else {
                 throw new Error('Neither message object nor URL provided for download');
             }
@@ -583,45 +740,77 @@ class WhatsAppClient extends EventEmitter {
         const checkStatus = async () => {
             try {
                 const status = await printQueue.getJobStatus(jobId);
-                
                 if (status.state === 'completed') {
-                    await this.sendMessage(recipient, 
+                    await this.sendMessage(recipient,
                         `✅ Your print job is ready!\n` +
                         `Job ID: ${jobId}\n` +
                         `Please collect your prints.`
                     );
                     return;
                 }
-
                 if (status.state === 'failed') {
-                    await this.sendMessage(recipient, 
+                    await this.sendMessage(recipient,
                         `❌ Your print job failed.\n` +
                         `Job ID: ${jobId}\n` +
                         `Please try again or contact support.`
                     );
                     return;
                 }
-
-                // Check again in 5 seconds if still processing
+                // still processing — check again later
                 setTimeout(checkStatus, 5000);
             } catch (error) {
                 console.error('Error monitoring job status:', error.message);
+                // try again later rather than crashing
+                setTimeout(checkStatus, 5000);
             }
         };
-
         checkStatus();
     }
 
     async sendMessage(to, message) {
         try {
-            if (!this.client) {
-                throw new Error('WhatsApp client not initialized');
+            if (!this.client || !this.isConnected) {
+                console.warn('Skipping sendMessage: WhatsApp client not connected');
+                return { success: false, message: 'not connected' };
             }
             await this.client.sendMessage(to, { text: message });
             return { success: true };
         } catch (error) {
             console.error('Error sending message:', error);
-            throw error;
+            // Do not throw to avoid cascading crashes during transient disconnects
+            return { success: false, error: error.message };
+        }
+    }
+
+    // Helper to get queue message for a user
+    async getQueueMessage(sender, job) {
+        try {
+            const printQueue = require('../print/queue');
+            const queue = printQueue.queue || [];
+            // Find the user's job in the queue
+            const idx = queue.findIndex(j => j.id === job.id);
+            if (idx === -1) return 'Your job is in the queue. ETA: unknown. Type "cancel job" to cancel.';
+            const position = idx + 1;
+            // Estimate ETA: assume 2 minutes per job (very rough)
+            const eta = position * 2;
+            return `Status: ${position === 1 ? 'Next' : 'In queue'}\nQueue position: ${position}\nETA: ${eta} minutes (approx)\nType "cancel job" to cancel your job.`;
+        } catch (e) {
+            return 'Your job is in the queue. ETA: unknown. Type "cancel job" to cancel.';
+        }
+    }
+
+    // Listen for job status updates and notify user
+    onJobStatusUpdate(jobId, status, details) {
+        const printQueue = require('../print/queue');
+        const job = printQueue.queue.find(j => j.id === jobId) || printQueue.completedJobs.find(j => j.id === jobId);
+        if (!job || !job.sender) return;
+        const sender = job.sender;
+        if (status === 'completed') {
+            this.sendMessage(sender, `✅ Your print job is ready!\nJob ID: ${jobId}\nPlease collect your prints.`);
+        } else if (status === 'failed') {
+            this.sendMessage(sender, `❌ Your print job failed.\nJob ID: ${jobId}\nPlease try again or contact support.`);
+        } else if (status === 'removed' || status === 'cancelled') {
+            this.sendMessage(sender, `❌ Your print job was cancelled.\nJob ID: ${jobId}`);
         }
     }
 }
