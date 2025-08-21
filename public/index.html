@@ -205,6 +205,7 @@
         let qrModalVisible = false;
         let wsReconnectAttempts = 0;
         let wsReconnectTimer = null;
+        let connectInProgress = false; // Add flag to prevent multiple connect calls
         
         // Task Management Variables
         let tasks = JSON.parse(localStorage.getItem('photocopy_tasks') || '[]');
@@ -213,6 +214,12 @@
 
         // Initialize WebSocket connection (native WebSocket) with auto-reconnect
         function initializeWebSocket() {
+            // Don't create new connection if one exists and is connecting/open
+            if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+                console.log('WebSocket already exists and is active, skipping initialization');
+                return;
+            }
+            
             try {
                 const protocol = (location.protocol === 'https:') ? 'wss' : 'ws';
                 socket = new WebSocket(`${protocol}://${location.host}`);
@@ -232,26 +239,30 @@
                 socket.addEventListener('message', (event) => {
                     try {
                         const data = JSON.parse(event.data);
+                        console.log('WebSocket message received:', data.event);
                         if (data.event === 'whatsapp_status_update' && data.status) {
                             updateWhatsAppStatus(data.status);
-                            // Do NOT automatically show QR modal based on WebSocket messages
                         } else if (data.event === 'whatsapp_qr' && data.qr) {
-                            console.log('WhatsApp QR code received');
+                            console.log('WhatsApp QR code received via WebSocket');
                             showQRCode(data.qr);
                         }
                     } catch (e) {
-                        console.log('Non-JSON WS message');
+                        console.log('Non-JSON WS message:', event.data);
                     }
                 });
 
-                socket.addEventListener('close', () => {
-                    console.log('WebSocket disconnected');
+                socket.addEventListener('close', (event) => {
+                    console.log('WebSocket disconnected, code:', event.code, 'reason:', event.reason);
+                    socket = null; // Clear the socket reference
                     scheduleWSReconnect();
                 });
 
                 socket.addEventListener('error', (err) => {
                     console.error('WebSocket error', err);
-                    try { socket.close(); } catch (_) {}
+                    if (socket) {
+                        socket.close();
+                        socket = null;
+                    }
                 });
             } catch (e) {
                 console.error('Failed to initialize WebSocket', e);
@@ -261,10 +272,11 @@
 
         function scheduleWSReconnect() {
             if (wsReconnectTimer) return; // already scheduled
-            const base = 500; // ms
-            const max = 10000; // ms cap
-            const delay = Math.min(max, base * Math.pow(2, wsReconnectAttempts)) + Math.floor(Math.random() * 200);
+            const base = 1000; // 1 second base
+            const max = 30000; // 30 seconds max
+            const delay = Math.min(max, base * Math.pow(1.5, wsReconnectAttempts)) + Math.floor(Math.random() * 1000);
             wsReconnectAttempts++;
+            console.log(`Scheduling WebSocket reconnect in ${delay}ms (attempt ${wsReconnectAttempts})`);
             wsReconnectTimer = setTimeout(() => {
                 wsReconnectTimer = null;
                 console.log('Reconnecting WebSocket...');
@@ -473,6 +485,12 @@
 
         // Function to connect WhatsApp
         async function connectWhatsApp() {
+            if (connectInProgress) {
+                console.log('Connect already in progress, ignoring');
+                return;
+            }
+            connectInProgress = true;
+            
             try {
                 // First, show the QR modal
                 document.getElementById('qrModal').classList.remove('hidden');
@@ -492,7 +510,7 @@
                     if (connectionCheckInterval) {
                         clearInterval(connectionCheckInterval);
                     }
-                    connectionCheckInterval = setInterval(checkConnectionStatus, 250);
+                    connectionCheckInterval = setInterval(checkConnectionStatus, 1000);
                 } else {
                     const errorMessage = data.error || data.message || 'Unknown error occurred';
                     alert('Failed to connect: ' + errorMessage);
@@ -507,6 +525,8 @@
                 // Hide modal on error
                 document.getElementById('qrModal').classList.add('hidden');
                 qrModalVisible = false;
+            } finally {
+                connectInProgress = false;
             }
         }
 
@@ -586,10 +606,12 @@
                         <div class="flex items-center space-x-2">
                             <span class="status-badge status-${job.status}">${job.status}</span>
                             ${job.status === 'queued' || job.status === 'processing' ? 
-                                `<button onclick="cancelJob('${job.id}')" class="px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-xs">Cancel</button>` : 
+                                `<button onclick="cancelJob('${job.id}')" 
+                                        class="px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-xs">Cancel</button>` : 
                                 ''}
                             ${job.status === 'failed' ? 
-                                `<button onclick="retryJob('${job.id}')" class="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs">Retry</button>` : 
+                                `<button onclick="retryJob('${job.id}')" 
+                                        class="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs">Retry</button>` : 
                                 ''}
                         </div>
                     </div>
@@ -1000,4 +1022,4 @@
         });
     </script>
 </body>
-</html> 
+</html>

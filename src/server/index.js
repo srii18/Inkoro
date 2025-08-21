@@ -142,9 +142,12 @@ class Server extends EventEmitter {
         // Queue API routes
         this.app.get('/api/queue', (req, res) => {
             try {
-                // Mock queue data for now
+                // Get real queue data
+                const printQueue = require('../print/queue');
+                const queueInstance = new printQueue();
                 res.json({
-                    jobs: []
+                    jobs: queueInstance.queue || [],
+                    stats: queueInstance.getStats()
                 });
             } catch (error) {
                 res.status(500).json({
@@ -154,14 +157,23 @@ class Server extends EventEmitter {
             }
         });
 
-        this.app.delete('/api/queue/job/:jobId', (req, res) => {
+        this.app.delete('/api/queue/job/:jobId', async (req, res) => {
             try {
                 const { jobId } = req.params;
-                // Mock response for now
-                res.json({
-                    success: true,
-                    message: `Job ${jobId} cancelled successfully`
-                });
+                const printQueue = require('../print/queue');
+                const queueInstance = new printQueue();
+                const result = await queueInstance.removeJob(jobId);
+                if (result) {
+                    res.json({
+                        success: true,
+                        message: `Job ${jobId} cancelled successfully`
+                    });
+                } else {
+                    res.status(404).json({
+                        success: false,
+                        error: 'Job not found'
+                    });
+                }
             } catch (error) {
                 res.status(500).json({
                     success: false,
@@ -170,14 +182,23 @@ class Server extends EventEmitter {
             }
         });
 
-        this.app.post('/api/queue/job/:jobId/retry', (req, res) => {
+        this.app.post('/api/queue/job/:jobId/retry', async (req, res) => {
             try {
                 const { jobId } = req.params;
-                // Mock response for now
-                res.json({
-                    success: true,
-                    message: `Job ${jobId} retried successfully`
-                });
+                const printQueue = require('../print/queue');
+                const queueInstance = new printQueue();
+                const result = await queueInstance.retryJob(jobId);
+                if (result) {
+                    res.json({
+                        success: true,
+                        message: `Job ${jobId} retried successfully`
+                    });
+                } else {
+                    res.status(404).json({
+                        success: false,
+                        error: 'Job not found'
+                    });
+                }
             } catch (error) {
                 res.status(500).json({
                     success: false,
@@ -186,9 +207,11 @@ class Server extends EventEmitter {
             }
         });
 
-        this.app.post('/api/queue/clear-completed', (req, res) => {
+        this.app.post('/api/queue/clear-completed', async (req, res) => {
             try {
-                // Mock response for now
+                const printQueue = require('../print/queue');
+                const queueInstance = new printQueue();
+                await queueInstance.cleanupOldJobs(0); // Remove all completed jobs
                 res.json({
                     success: true,
                     message: 'Completed jobs cleared successfully'
@@ -202,15 +225,47 @@ class Server extends EventEmitter {
         });
 
         // Documents API routes
-        this.app.get('/api/documents/recent', (req, res) => {
+        this.app.get('/api/documents/recent', async (req, res) => {
             try {
-                // Mock recent documents for now
-                res.json([]);
+                const documentManager = require('../storage/documentManager');
+                const documents = await documentManager.getRecentDocuments(50); // Get last 50 documents
+                res.json(documents || []);
+            } catch (error) {
+                console.error('Error fetching recent documents:', error);
+                res.json([]); // Return empty array on error to prevent frontend crashes
+            }
+        });
+
+        this.app.delete('/api/documents/recent', async (req, res) => {
+            try {
+                const documentManager = require('../storage/documentManager');
+                await documentManager.clearRecentDocuments();
+                res.json({
+                    success: true,
+                    message: 'Recent documents cleared successfully'
+                });
             } catch (error) {
                 res.status(500).json({
                     success: false,
                     error: error.message
                 });
+            }
+        });
+
+        // Serve document files
+        this.app.get('/storage/documents/:filename', (req, res) => {
+            try {
+                const { filename } = req.params;
+                const documentManager = require('../storage/documentManager');
+                const filePath = documentManager.getDocumentPath(filename);
+                
+                if (filePath && require('fs').existsSync(filePath)) {
+                    res.sendFile(filePath);
+                } else {
+                    res.status(404).json({ error: 'Document not found' });
+                }
+            } catch (error) {
+                res.status(500).json({ error: error.message });
             }
         });
 
@@ -224,13 +279,21 @@ class Server extends EventEmitter {
         if (!this.whatsapp) return;
         const safeBroadcast = (payload) => {
             const data = JSON.stringify(payload);
+            console.log('Broadcasting to', this.wsClients.size, 'clients:', payload.event);
             for (const ws of this.wsClients) {
-                try { ws.send(data); } catch (_) {}
+                try { 
+                    if (ws.readyState === 1) { // WebSocket.OPEN
+                        ws.send(data); 
+                    }
+                } catch (e) {
+                    console.error('Error broadcasting to client:', e.message);
+                }
             }
         };
         // Status updates
         this.whatsapp.on('statusChange', () => {
             const status = this.whatsapp.getStatus();
+            console.log('WhatsApp status changed:', status.status);
             // Clear QR when connected
             if (status.status === 'connected' && this.qrManager) {
                 this.qrManager.clearQR();
@@ -239,7 +302,11 @@ class Server extends EventEmitter {
         });
         // QR updates (client should emit 'qr' with code or null)
         this.whatsapp.on('qr', (qr) => {
-            if (!qr) return; // ignore null expiry notices for now
+            console.log('QR event received in server, broadcasting to clients');
+            if (!qr) {
+                console.log('QR is null, not broadcasting');
+                return; // ignore null expiry notices for now
+            }
             safeBroadcast({ event: 'whatsapp_qr', qr });
         });
     }

@@ -1,6 +1,7 @@
 require('dotenv').config();
 const Server = require('./server');
 const WhatsAppClient = require('./whatsapp/client');
+const PrintQueue = require('./print/queue');
 const config = require('../config');
 const { ensureDirectoriesExist } = require('./utils/fileSystem');
 
@@ -11,12 +12,33 @@ async function start() {
         // Ensure required directories exist
         await ensureDirectoriesExist();
         
+        // Initialize print queue first
+        const printQueue = new PrintQueue();
+        console.log('✅ Print queue initialized');
+        
         // Initialize WhatsApp client but do NOT auto-connect.
         // The web dashboard's Connect button will call the API to connect.
         const whatsapp = new WhatsAppClient();
+        
+        // Connect WhatsApp client to print queue
+        whatsapp.on('printJob', async (job) => {
+            try {
+                console.log('📋 Adding print job to queue:', job.fileName);
+                await printQueue.addJob(job);
+            } catch (error) {
+                console.error('Failed to add print job to queue:', error);
+            }
+        });
+        
+        // Connect print queue status updates back to WhatsApp
+        printQueue.on('statusUpdated', (update) => {
+            if (whatsapp.onJobStatusUpdate) {
+                whatsapp.onJobStatusUpdate(update.jobId, update.status, update);
+            }
+        });
 
-        // Initialize server with WhatsApp instance for API control
-        const server = new Server(whatsapp);
+        // Initialize server with WhatsApp instance and print queue for API control
+        const server = new Server(whatsapp, printQueue);
         await server.start(config.port);
         console.log('✅ Server started successfully');
 

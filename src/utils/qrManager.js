@@ -7,10 +7,10 @@ class QRManager {
         this.currentQR = null;
         this.qrGeneratedAt = null;
         this.qrTimeout = null;
-        this.qrLifetime = 60000; // 60 seconds
+        this.qrLifetime = 120000; // 120 seconds to match WhatsApp client
         this.isGenerating = false;
         this.lastQRUpdate = 0;
-        this.qrUpdateDebounce = 2000; // 2 second debounce
+        this.qrUpdateDebounce = 1000; // Reduced to 1 second debounce
         
         // Listen for QR codes from WhatsApp client
         if (this.whatsappClient) {

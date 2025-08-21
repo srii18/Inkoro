@@ -30,7 +30,7 @@ class WhatsAppClient extends EventEmitter {
         this.isConnected = false;
         this.qrCode = null;
         this.qrTimestamp = null;
-        this.qrTimeoutMs = 60000; // 60 seconds
+        this.qrTimeoutMs = 120000; // Increased to 2 minutes
         this.connectionStatus = 'disconnected';
         // Resolve auth folder from config (env-backed) with absolute path
         this.authFolder = path.isAbsolute(config.whatsappAuthPath)
@@ -39,12 +39,12 @@ class WhatsAppClient extends EventEmitter {
         this.initializeAuthFolder();
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5; // Increased from 3
-        this.reconnectDelay = 10000; // Increased from 5 seconds
+        this.reconnectDelay = 15000; // Reduced from 10 seconds
         this.isConnecting = false;
         this.pendingJobs = new Map();
         this.qrTimeoutHandle = null;
         this.lastReconnectAttempt = 0; // Track last reconnect attempt
-        this.minReconnectInterval = 30000; // Minimum 30 seconds between attempts
+        this.minReconnectInterval = 60000; // Increased to 60 seconds between attempts
         // Add per-user session state
         this.userSessions = new Map(); // { [jid]: { active: bool, timeout: NodeJS.Timeout|null } }
         this.CODE_MESSAGE = 'hi'; // code to start sequence
@@ -555,29 +555,34 @@ class WhatsAppClient extends EventEmitter {
                         ...instructions
                     }
                 };
-                // The document should already be downloaded and saved when the pending job was created
-                // We just need to update the instructions and create the print job
-                // Create final print job with the file already saved
-                const printJob = {
-                    ...updatedJob,
-                    instructions: {
-                        ...updatedJob.instructions,
-                        ...instructions
-                    }
-                };
-                // Emit print job event
-                this.emit('printJob', printJob);
-                // Send confirmation
-                await this.sendMessage(sender, 
-                    `✅ Print job created!\n\n` +
-                    `📄 ${printJob.fileName}\n` +
-                    `📋 Copies: ${printJob.instructions.copies}\n` +
-                    `📏 Paper: ${printJob.instructions.paperSize.toUpperCase()}\n` +
-                    `🎨 Color pages: ${printJob.instructions.colorPages.length > 0 ? printJob.instructions.colorPages.join(', ') : 'None'}\n` +
-                    `⏰ Priority: ${printJob.instructions.priority}\n\n` +
-                    `🖨️ Your job is now in the print queue.\n` +
-                    await this.getQueueMessage(sender, printJob)
-                );
+                
+                // Add job to print queue
+                try {
+                    const printQueue = require('../print/queue');
+                    const queuedJob = await printQueue.addJob(updatedJob);
+                    console.log(`📋 Print job added to queue: ${queuedJob.id}`);
+                    
+                    // Send confirmation with queue position
+                    const queueMessage = await this.getQueueMessage(sender, queuedJob);
+                    await this.sendMessage(sender, 
+                        `✅ Print job created!\n\n` +
+                        `📄 ${updatedJob.fileName}\n` +
+                        `📋 Copies: ${updatedJob.instructions.copies}\n` +
+                        `📏 Paper: ${updatedJob.instructions.paperSize.toUpperCase()}\n` +
+                        `🎨 Color pages: ${updatedJob.instructions.colorPages.length > 0 ? updatedJob.instructions.colorPages.join(', ') : 'None'}\n` +
+                        `⏰ Priority: ${updatedJob.instructions.priority}\n\n` +
+                        `🖨️ ${queueMessage}`
+                    );
+                } catch (queueError) {
+                    console.error('Failed to add job to print queue:', queueError);
+                    await this.sendMessage(sender, 
+                        `⚠️ Print job created but failed to add to queue: ${queueError.message}\n` +
+                        `Please contact support if this issue persists.`
+                    );
+                }
+                
+                // Emit print job event for other components
+                this.emit('printJob', updatedJob);
                 // Remove from pending jobs
                 this.removePendingJob(sender);
             } else {
@@ -623,8 +628,24 @@ class WhatsAppClient extends EventEmitter {
                             },
                             timestamp: new Date().toISOString()
                         };
-                        this.emit('printJob', printJob);
-                        await this.sendMessage(sender, `✅ Print job created for ${session.pendingImageBatch.length} images (${text === 'print color' ? 'Color' : 'B&W'}).`);
+                        // Add job to print queue
+                        try {
+                            const printQueue = require('../print/queue');
+                            const queuedJob = await printQueue.addJob(printJob);
+                            console.log(`📋 Print job added to queue: ${queuedJob.id}`);
+                            // Send confirmation with queue position
+                            const queueMessage = await this.getQueueMessage(sender, queuedJob);
+                            await this.sendMessage(sender, 
+                                `✅ Print job created for ${session.pendingImageBatch.length} images (${text === 'print color' ? 'Color' : 'B&W'}).`);
+                            // Emit print job event for other components
+                            this.emit('printJob', printJob);
+                        } catch (queueError) {
+                            console.error('Failed to add job to print queue:', queueError);
+                            await this.sendMessage(sender, 
+                                `⚠️ Print job created but failed to add to queue: ${queueError.message}\n` +
+                                `Please contact support if this issue persists.`
+                            );
+                        }
                         delete session.pendingImageBatch;
                         delete session.imageBatchPerPage;
                         this.userSessions.set(sender, session);
