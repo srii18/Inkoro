@@ -234,11 +234,7 @@
                         const data = JSON.parse(event.data);
                         if (data.event === 'whatsapp_status_update' && data.status) {
                             updateWhatsAppStatus(data.status);
-                            // If status is connecting or disconnected during an active connect flow, show modal
-                            if ((data.status.status === 'connecting' || data.status.status === 'disconnected') && !qrModalVisible) {
-                                document.getElementById('qrModal').classList.remove('hidden');
-                                qrModalVisible = true;
-                            }
+                            // Do NOT automatically show QR modal based on WebSocket messages
                         } else if (data.event === 'whatsapp_qr' && data.qr) {
                             console.log('WhatsApp QR code received');
                             showQRCode(data.qr);
@@ -280,9 +276,11 @@
             initializeWebSocket();
             checkConnectionStatus();
             setInterval(checkConnectionStatus, 5000);
-            // Hide/remove any deprecated Show QR button if present
-            const btn = document.getElementById('showQRButton');
-            if (btn) btn.remove();
+            // Initialize tasks
+            initializeTasks();
+            // Ensure QR modal is hidden on page load
+            document.getElementById('qrModal').classList.add('hidden');
+            qrModalVisible = false;
         });
 
         // Function to update WhatsApp status
@@ -295,37 +293,34 @@
                 case 'connected':
                     statusDot.classList.add('bg-green-500');
                     statusText.textContent = 'WhatsApp: Connected';
+                    // Always hide QR modal when connected
                     document.getElementById('qrModal').classList.add('hidden');
-                    document.getElementById('showQRButton').classList.add('hidden');
-                    if (qrTimeout) clearTimeout(qrTimeout);
                     qrModalVisible = false;
+                    if (qrTimeout) clearTimeout(qrTimeout);
                     break;
                 case 'connecting':
                     statusDot.classList.add('bg-yellow-500');
                     statusText.textContent = 'WhatsApp: Connecting...';
-                    // Auto-open QR modal and request QR while connecting
-                    document.getElementById('qrModal').classList.remove('hidden');
-                    if (!qrModalVisible) {
-                        qrModalVisible = true;
-                        requestQR();
-                    }
+                    // Do NOT show QR modal automatically
                     break;
                 case 'reconnecting':
                     statusDot.classList.add('bg-yellow-500');
-                    statusText.textContent = `WhatsApp: ${status.status === 'connecting' ? 'Connecting...' : 'Reconnecting...'}`;
-                    // Don't hide QR modal here - let it stay visible
+                    statusText.textContent = 'WhatsApp: Reconnecting...';
                     break;
                 case 'failed':
                     statusDot.classList.add('bg-red-500');
                     statusText.textContent = 'WhatsApp: Connection Failed';
-                    // Keep modal closed on failure; user can click Connect again
-                    if (qrTimeout) clearTimeout(qrTimeout);
+                    // Hide modal on failure
+                    document.getElementById('qrModal').classList.add('hidden');
                     qrModalVisible = false;
+                    if (qrTimeout) clearTimeout(qrTimeout);
                     break;
                 default:
                     statusDot.classList.add('bg-gray-500');
                     statusText.textContent = 'WhatsApp: Disconnected';
-                    // Don't hide QR modal here - let it stay visible if QR is present
+                    // Always keep modal closed by default
+                    document.getElementById('qrModal').classList.add('hidden');
+                    qrModalVisible = false;
                     break;
             }
         }
@@ -334,26 +329,52 @@
         function showQRCode(qrCode) {
             const qrContainer = document.getElementById('qrCode');
             if (!qrCode) return;
+            
+            // Check if this is the same QR we already have
+            if (lastQR === qrCode) {
+                console.log('Same QR code, not updating display');
+                return;
+            }
+            
+            console.log('Updating QR display with new code');
             lastQR = qrCode;
+            
+            // Clear any loading states
             qrContainer.innerHTML = '';
             qrContainer.setAttribute('data-qr', qrCode);
-            new QRCode(qrContainer, {
-                text: qrCode,
-                width: 256,
-                height: 256,
-                colorDark: '#000000',
-                colorLight: '#ffffff',
-                correctLevel: QRCode.CorrectLevel.H
-            });
-            document.getElementById('qrModal').classList.remove('hidden');
-            document.getElementById('showQRButton').classList.add('hidden');
-            qrModalVisible = true;
-            if (qrTimeout) clearTimeout(qrTimeout);
-            qrTimeout = setTimeout(() => {
-                document.getElementById('qrModal').classList.add('hidden');
-                document.getElementById('showQRButton').classList.remove('hidden');
-                qrModalVisible = false;
-            }, 60000);
+            
+            try {
+                new QRCode(qrContainer, {
+                    text: qrCode,
+                    width: 256,
+                    height: 256,
+                    colorDark: '#000000',
+                    colorLight: '#ffffff',
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+                
+                document.getElementById('qrModal').classList.remove('hidden');
+                qrModalVisible = true;
+                
+                // Auto-hide QR after 60 seconds
+                if (qrTimeout) clearTimeout(qrTimeout);
+                qrTimeout = setTimeout(() => {
+                    document.getElementById('qrModal').classList.add('hidden');
+                    qrModalVisible = false;
+                    showNotification('QR code expired. Click Connect to generate a new one.', 'info');
+                }, 60000);
+                
+            } catch (error) {
+                console.error('Error generating QR code:', error);
+                qrContainer.innerHTML = `
+                    <div class="text-center p-8">
+                        <p class="text-red-600 mb-4">Error displaying QR code</p>
+                        <button onclick="requestQR()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                            Try Again
+                        </button>
+                    </div>
+                `;
+            }
         }
 
         // Function to close QR modal
@@ -364,10 +385,76 @@
             qrModalVisible = false;
         }
 
+        let qrRequestInProgress = false;
+        let lastQRRequest = 0;
+        const qrRequestDebounce = 3000; // 3 second debounce
+        
         function requestQR() {
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ action: 'request_whatsapp_qr' }));
+            const now = Date.now();
+            
+            // Prevent multiple simultaneous requests
+            if (qrRequestInProgress) {
+                console.log('QR request already in progress, ignoring');
+                return;
             }
+            
+            // Debounce rapid requests
+            if (now - lastQRRequest < qrRequestDebounce) {
+                console.log('QR request too soon, ignoring (debounced)');
+                return;
+            }
+            
+            lastQRRequest = now;
+            qrRequestInProgress = true;
+            const qrContainer = document.getElementById('qrCode');
+            
+            // Show loading state
+            qrContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center p-8">
+                    <div class="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-500 mb-4"></div>
+                    <p class="text-gray-600">Getting QR code...</p>
+                    <p class="text-xs text-gray-500 mt-2">Please wait...</p>
+                </div>
+            `;
+            
+            // Use API call with timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+            
+            fetch('/api/whatsapp/qr', { signal: controller.signal })
+                .then(response => response.json())
+                .then(data => {
+                    clearTimeout(timeoutId);
+                    qrRequestInProgress = false;
+                    
+                    if (data.success && data.qr) {
+                        showQRCode(data.qr);
+                    } else {
+                        qrContainer.innerHTML = `
+                            <div class="text-center p-8">
+                                <p class="text-red-600 mb-4">${data.message || 'QR code not available'}</p>
+                                <button onclick="requestQR()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                                    Try Again
+                                </button>
+                            </div>
+                        `;
+                    }
+                })
+                .catch(error => {
+                    clearTimeout(timeoutId);
+                    qrRequestInProgress = false;
+                    console.error('Error requesting QR:', error);
+                    
+                    const errorMessage = error.name === 'AbortError' ? 'Request timed out' : 'Network error occurred';
+                    qrContainer.innerHTML = `
+                        <div class="text-center p-8">
+                            <p class="text-red-600 mb-4">${errorMessage}</p>
+                            <button onclick="requestQR()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                                Try Again
+                            </button>
+                        </div>
+                    `;
+                });
         }
 
         // Function to check connection status
@@ -387,6 +474,11 @@
         // Function to connect WhatsApp
         async function connectWhatsApp() {
             try {
+                // First, show the QR modal
+                document.getElementById('qrModal').classList.remove('hidden');
+                qrModalVisible = true;
+                
+                // Then make the API call
                 const response = await fetch('/api/whatsapp/connect', {
                     method: 'POST'
                 });
@@ -394,9 +486,7 @@
                 
                 if (data.success) {
                     updateWhatsAppStatus(data.status);
-                    // Immediately open QR modal and request a fresh QR
-                    document.getElementById('qrModal').classList.remove('hidden');
-                    qrModalVisible = true;
+                    // Request QR code
                     requestQR();
                     // Start checking connection status more frequently
                     if (connectionCheckInterval) {
@@ -404,11 +494,19 @@
                     }
                     connectionCheckInterval = setInterval(checkConnectionStatus, 250);
                 } else {
-                    alert('Failed to connect: ' + data.error);
+                    const errorMessage = data.error || data.message || 'Unknown error occurred';
+                    alert('Failed to connect: ' + errorMessage);
+                    console.error('Connect API response:', data);
+                    // Hide modal on error
+                    document.getElementById('qrModal').classList.add('hidden');
+                    qrModalVisible = false;
                 }
             } catch (error) {
                 console.error('Error connecting WhatsApp:', error);
-                alert('Failed to connect. Please try again.');
+                alert('Network error: ' + error.message);
+                // Hide modal on error
+                document.getElementById('qrModal').classList.add('hidden');
+                qrModalVisible = false;
             }
         }
 

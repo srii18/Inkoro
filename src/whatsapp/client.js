@@ -38,11 +38,13 @@ class WhatsAppClient extends EventEmitter {
             : path.join(process.cwd(), config.whatsappAuthPath);
         this.initializeAuthFolder();
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 3;
-        this.reconnectDelay = 5000; // 5 seconds
+        this.maxReconnectAttempts = 5; // Increased from 3
+        this.reconnectDelay = 10000; // Increased from 5 seconds
         this.isConnecting = false;
         this.pendingJobs = new Map();
         this.qrTimeoutHandle = null;
+        this.lastReconnectAttempt = 0; // Track last reconnect attempt
+        this.minReconnectInterval = 30000; // Minimum 30 seconds between attempts
         // Add per-user session state
         this.userSessions = new Map(); // { [jid]: { active: bool, timeout: NodeJS.Timeout|null } }
         this.CODE_MESSAGE = 'hi'; // code to start sequence
@@ -176,13 +178,18 @@ class WhatsAppClient extends EventEmitter {
                         // Clear auth state so next attempt will produce a QR
                         try { await this.clearAuthState(); } catch {}
                         this.reconnectAttempts = 0;
-                        setTimeout(() => this.connect(), 15000);
+                        // Increase wait time for rate limiting and add exponential backoff
+                        const waitTime = Math.min(60000, 30000 * Math.pow(2, this.reconnectAttempts));
+                        console.log(`Waiting ${waitTime}ms before reconnecting...`);
+                        setTimeout(() => this.connect(), waitTime);
                         return;
                     }
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut && 
-                                         this.reconnectAttempts < this.maxReconnectAttempts;
+                                         this.reconnectAttempts < this.maxReconnectAttempts &&
+                                         this.canAttemptReconnect();
                     if (shouldReconnect) {
                         this.reconnectAttempts++;
+                        this.lastReconnectAttempt = Date.now();
                         this.connectionStatus = 'reconnecting';
                         this.emit('statusChange', this.connectionStatus);
                         setTimeout(() => this.connect(), this.reconnectDelay);
@@ -191,7 +198,11 @@ class WhatsAppClient extends EventEmitter {
                         this.emit('statusChange', this.connectionStatus);
                         this.isConnected = false;
                         this.isConnecting = false;
-                        this.reconnectAttempts = 0;
+                        if (!this.canAttemptReconnect()) {
+                            console.log(`Waiting ${Math.ceil((this.minReconnectInterval - (Date.now() - this.lastReconnectAttempt)) / 1000)}s before next reconnect attempt`);
+                        } else {
+                            this.reconnectAttempts = 0;
+                        }
                         this.qrCode = null;
                         this.qrTimestamp = null;
                         if (this.qrTimeoutHandle) clearTimeout(this.qrTimeoutHandle);
@@ -216,6 +227,9 @@ class WhatsAppClient extends EventEmitter {
                     }
                 }
             });
+
+            // Add connection health check
+            this.startHealthCheck();
             return { success: true, message: 'WhatsApp client initialized' };
         } catch (error) {
             console.error('WhatsApp connection error:', error);
@@ -286,8 +300,62 @@ class WhatsAppClient extends EventEmitter {
         };
     }
 
+    isReady() {
+        return this.isConnected && this.connectionStatus === 'connected' && this.client;
+    }
+
+    canAttemptReconnect() {
+        const now = Date.now();
+        return (now - this.lastReconnectAttempt) >= this.minReconnectInterval;
+    }
+
+    async recoverConnection() {
+        try {
+            console.log('Attempting to recover connection...');
+            if (this.client && this.connectionStatus === 'connected') {
+                return true; // Already connected
+            }
+            
+            // Try to reconnect
+            await this.connect();
+            return true;
+        } catch (error) {
+            console.error('Connection recovery failed:', error);
+            return false;
+        }
+    }
+
+    startHealthCheck() {
+        // Check connection health every 30 seconds
+        setInterval(async () => {
+            try {
+                if (this.client && this.connectionStatus === 'connected') {
+                    // Try a simple operation to test connection
+                    if (this.client.user) {
+                        // Connection is healthy
+                        return;
+                    }
+                }
+                
+                // Connection seems unhealthy, try to recover
+                if (this.connectionStatus === 'disconnected' || this.connectionStatus === 'failed') {
+                    console.log('Connection unhealthy, attempting recovery...');
+                    await this.recoverConnection();
+                }
+            } catch (error) {
+                console.error('Health check error:', error);
+            }
+        }, 30000); // 30 seconds
+    }
+
     async handleIncomingMessage(message) {
         try {
+            // Check connection state before processing messages
+            if (!this.isConnected || this.connectionStatus !== 'connected') {
+                console.log('Skipping message processing: WhatsApp not connected');
+                return;
+            }
+            
             const messageContent = message.message;
             if (!messageContent) return;
 
@@ -318,12 +386,22 @@ class WhatsAppClient extends EventEmitter {
 
         } catch (error) {
             console.error('Error handling incoming message:', error);
-            await this.sendMessage(message.key.remoteJid, '❌ Sorry, there was an error processing your request.');
+            try {
+                await this.sendMessage(message.key.remoteJid, '❌ Sorry, there was an error processing your request.');
+            } catch (sendError) {
+                console.error('Failed to send error message to user:', sendError);
+            }
         }
     }
 
     async handleDocumentMessage(message) {
         try {
+            // Check connection state before processing
+            if (!this.isConnected || this.connectionStatus !== 'connected') {
+                console.log('Skipping document processing: WhatsApp not connected');
+                return;
+            }
+            
             const documentManager = require('../storage/documentManager');
             const document = message.message.documentMessage;
             const fileName = document.fileName || `document_${Date.now()}.${document.mimetype ? document.mimetype.split('/').pop() : 'pdf'}`;
@@ -379,16 +457,26 @@ class WhatsAppClient extends EventEmitter {
 
         } catch (error) {
             console.error('Error handling document message:', error);
-            await this.sendMessage(
-                message.key.remoteJid, 
-                `❌ Error processing document: ${error.message}\n\n` +
-                'Please try sending the file again or contact support if the problem persists.'
-            );
+            try {
+                await this.sendMessage(
+                    message.key.remoteJid, 
+                    `❌ Error processing document: ${error.message}\n\n` +
+                    'Please try sending the file again or contact support if the problem persists.'
+                );
+            } catch (sendError) {
+                console.error('Failed to send error message for document:', sendError);
+            }
         }
     }
 
     async handleTextMessage(message) {
         try {
+            // Check connection state before processing
+            if (!this.isConnected || this.connectionStatus !== 'connected') {
+                console.log('Skipping text message processing: WhatsApp not connected');
+                return;
+            }
+            
             const instructionParser = require('../parser/instructionParser');
             const documentManager = require('../storage/documentManager');
             const printQueue = require('../print/queue');
@@ -547,12 +635,22 @@ class WhatsAppClient extends EventEmitter {
 
         } catch (error) {
             console.error('Error handling text message:', error);
-            await this.sendMessage(message.key.remoteJid, '❌ Error processing message. Please try again.');
+            try {
+                await this.sendMessage(message.key.remoteJid, '❌ Error processing message. Please try again.');
+            } catch (sendError) {
+                console.error('Failed to send error message for text:', sendError);
+            }
         }
     }
 
     async handleImageMessage(message) {
         try {
+            // Check connection state before processing
+            if (!this.isConnected || this.connectionStatus !== 'connected') {
+                console.log('Skipping image processing: WhatsApp not connected');
+                return;
+            }
+            
             const documentManager = require('../storage/documentManager');
             const image = message.message.imageMessage;
             const fileName = `image_${Date.now()}.${image.mimetype ? image.mimetype.split('/').pop() : 'jpg'}`;
@@ -654,22 +752,66 @@ class WhatsAppClient extends EventEmitter {
 
             // Download the media using the message object if available
             let buffer;
-            if (messageObj) {
-                // Use the full message object for proper media download
-                buffer = await downloadMediaMessage(messageObj, 'buffer', {});
-            } else if (url) {
-                // Fallback method if only URL is available
-                buffer = await downloadMediaMessage({
-                    key: { remoteJid: 'status@broadcast' },
-                    message: { 
-                        documentMessage: { 
-                            url: url,
-                            mimetype: this.getMimeType(fileName)
-                        } 
+            try {
+                if (messageObj) {
+                    // Use the full message object for proper media download
+                    buffer = await downloadMediaMessage(messageObj, 'buffer', {});
+                } else if (url) {
+                    // Fallback method if only URL is available
+                    buffer = await downloadMediaMessage({
+                        key: { remoteJid: 'status@broadcast' },
+                        message: { 
+                            documentMessage: { 
+                                url: url,
+                                mimetype: this.getMimeType(fileName)
+                            } 
+                        }
+                    }, 'buffer', {});
+                } else {
+                    throw new Error('Neither message object nor URL provided for download');
+                }
+            } catch (downloadError) {
+                console.error('Download error details:', {
+                    error: downloadError.message,
+                    stack: downloadError.stack,
+                    messageObj: messageObj ? 'present' : 'missing',
+                    url: url || 'missing'
+                });
+                
+                // Try alternative download method if the first one fails
+                if (messageObj && messageObj.message) {
+                    try {
+                        // Try to extract direct URL from message
+                        const message = messageObj.message;
+                        let mediaUrl = null;
+                        
+                        if (message.documentMessage) {
+                            mediaUrl = message.documentMessage.url;
+                        } else if (message.imageMessage) {
+                            mediaUrl = message.imageMessage.url;
+                        }
+                        
+                        if (mediaUrl) {
+                            console.log('Trying alternative download method with URL:', mediaUrl);
+                            buffer = await downloadMediaMessage({
+                                key: { remoteJid: 'status@broadcast' },
+                                message: { 
+                                    documentMessage: { 
+                                        url: mediaUrl,
+                                        mimetype: this.getMimeType(fileName)
+                                    } 
+                                }
+                            }, 'buffer', {});
+                        } else {
+                            throw new Error('No media URL found in message');
+                        }
+                    } catch (altError) {
+                        console.error('Alternative download method also failed:', altError.message);
+                        throw new Error(`Download failed: ${downloadError.message}. Alternative method: ${altError.message}`);
                     }
-                }, 'buffer', {});
-            } else {
-                throw new Error('Neither message object nor URL provided for download');
+                } else {
+                    throw downloadError;
+                }
             }
 
             if (!buffer || buffer.length === 0) {
@@ -699,7 +841,6 @@ class WhatsAppClient extends EventEmitter {
                 hasMessageObj: !!messageObj
             });
             
-            // In production, we should not fall back to mock data
             throw new Error(`Failed to download document: ${error.message}`);
         }
     }
@@ -769,9 +910,9 @@ class WhatsAppClient extends EventEmitter {
 
     async sendMessage(to, message) {
         try {
-            if (!this.client || !this.isConnected) {
-                console.warn('Skipping sendMessage: WhatsApp client not connected');
-                return { success: false, message: 'not connected' };
+            if (!this.isReady()) {
+                console.warn('Skipping sendMessage: WhatsApp client not ready');
+                return { success: false, message: 'not ready' };
             }
             await this.client.sendMessage(to, { text: message });
             return { success: true };

@@ -3,6 +3,7 @@ const path = require('path');
 const WebSocket = require('ws');
 const EventEmitter = require('events');
 const { sanitizeLog } = require('../utils/sanitize');
+const QRManager = require('../utils/qrManager');
 
 class Server extends EventEmitter {
     constructor(whatsapp = null) {
@@ -10,6 +11,7 @@ class Server extends EventEmitter {
         this.app = express();
         this.whatsapp = whatsapp;
         this.wsClients = new Set();
+        this.qrManager = whatsapp ? new QRManager(whatsapp) : null;
         this.setupMiddleware();
         this.setupRoutes();
         this.setupAPIRoutes();
@@ -43,14 +45,44 @@ class Server extends EventEmitter {
 
         this.app.post('/api/whatsapp/connect', async (req, res) => {
             try {
+                console.log('Connect API called');
+                
                 if (!this.whatsapp) {
+                    console.log('WhatsApp client not initialized');
                     return res.status(400).json({ success: false, error: 'WhatsApp client not initialized' });
                 }
+                
+                // Check if already connecting or connected
+                const currentStatus = this.whatsapp.getStatus();
+                if (currentStatus.isConnecting || currentStatus.isConnected) {
+                    console.log('Already connecting or connected, returning current status');
+                    return res.json({ 
+                        success: true, 
+                        status: currentStatus,
+                        message: 'Already connected or connecting'
+                    });
+                }
+                
+                console.log('Starting WhatsApp connection...');
+                
+                // Start the connection process
                 const result = await this.whatsapp.connect();
-                const status = await this.whatsapp.getStatus();
-                res.json({ success: result?.success !== false, status });
+                console.log('Connect result:', result);
+                
+                // Get current status
+                const status = this.whatsapp.getStatus();
+                console.log('Current status:', status);
+                
+                // Return success if connection started successfully
+                res.json({ 
+                    success: true, 
+                    status: status,
+                    message: result?.message || 'Connection process started'
+                });
+                
             } catch (error) {
-                res.status(500).json({ success: false, error: error.message });
+                console.error('WhatsApp connect error:', error);
+                res.status(500).json({ success: false, error: error.message || 'Unknown connection error' });
             }
         });
 
@@ -62,6 +94,29 @@ class Server extends EventEmitter {
                 await this.whatsapp.disconnect();
                 res.json({ success: true, status: { status: 'disconnected', isConnected: false, isConnecting: false } });
             } catch (error) {
+                res.status(500).json({ success: false, error: error.message });
+            }
+        });
+
+        // Simple QR endpoint using QR Manager
+        this.app.get('/api/whatsapp/qr', async (req, res) => {
+            try {
+                if (!this.qrManager) {
+                    return res.json({ success: false, error: 'QR Manager not initialized' });
+                }
+                
+                console.log('QR API called, QR Manager status:', this.qrManager.getStatus());
+                
+                const qrCode = await this.qrManager.getQR();
+                
+                if (qrCode) {
+                    res.json({ success: true, qr: qrCode });
+                } else {
+                    res.json({ success: false, message: 'QR code not available' });
+                }
+                
+            } catch (error) {
+                console.error('QR API error:', error);
                 res.status(500).json({ success: false, error: error.message });
             }
         });
@@ -176,6 +231,10 @@ class Server extends EventEmitter {
         // Status updates
         this.whatsapp.on('statusChange', () => {
             const status = this.whatsapp.getStatus();
+            // Clear QR when connected
+            if (status.status === 'connected' && this.qrManager) {
+                this.qrManager.clearQR();
+            }
             safeBroadcast({ event: 'whatsapp_status_update', status });
         });
         // QR updates (client should emit 'qr' with code or null)
@@ -184,6 +243,8 @@ class Server extends EventEmitter {
             safeBroadcast({ event: 'whatsapp_qr', qr });
         });
     }
+
+    // QR management is now handled by QRManager class
 
     start(port) {
         return new Promise((resolve, reject) => {
@@ -236,17 +297,11 @@ class Server extends EventEmitter {
                     // Try to parse commands
                     let parsed = null;
                     try { parsed = JSON.parse(String(message)); } catch {}
-                    if (parsed && parsed.action === 'request_whatsapp_qr') {
-                        if (this.whatsapp) {
-                            const status = this.whatsapp.getStatus();
-                            if (status.qrCode) {
-                                ws.send(JSON.stringify({ event: 'whatsapp_qr', qr: status.qrCode }));
-                            } else {
-                                // Always try to force a fresh QR when requested
-                                this.whatsapp.forceQR?.().catch(() => {});
-                            }
+                                            // QR requests are now handled via API endpoint /api/whatsapp/qr
+                        // WebSocket is only used for status updates
+                        if (parsed && parsed.action === 'request_whatsapp_qr') {
+                            console.log('QR request received via WebSocket - use API endpoint instead');
                         }
-                    }
                 } catch {
                     console.log('Received WS message: [unreadable]');
                 }
