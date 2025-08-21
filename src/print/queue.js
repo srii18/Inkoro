@@ -286,4 +286,4 @@ class PrintQueue extends EventEmitter {
     }
 }
 
-module.exports = PrintQueue; 
+module.exports = new PrintQueue(); 

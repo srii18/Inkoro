@@ -14,14 +14,20 @@ Photocopy Optimizer is a Node.js application for managing photocopy and print jo
   - Group images for batch printing
   - View printer status
 
-## .env Variables
-List all required environment variables in your `.env` file:
+## Environment Variables
+Create a `.env` file in the project root. Example:
 ```
-PORT=3002
+# Server
+PORT=3000
 NODE_ENV=development
-WHATSAPP_API_KEY=your_whatsapp_api_key
-REDIS_URL=redis://localhost:6379
-PRINTER_CONFIG_PATH=./config/printers.json
+
+# Storage directories (can be absolute or relative)
+STORAGE_PATH=./storage
+DATA_PATH=./data
+LOGS_PATH=./logs
+
+# WhatsApp (Baileys) auth state folder
+WHATSAPP_AUTH_PATH=./whatsapp_auth
 ```
 
 ## Technologies Used

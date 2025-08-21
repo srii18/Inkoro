@@ -1,3 +1,12 @@
+function sanitizeLog(input) {
+    const str = String(input || '');
+    // Remove control characters and truncate long strings for logs
+    const cleaned = str.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '').slice(0, 5000);
+    return { summary: cleaned };
+}
+
+module.exports = { sanitizeLog };
+
 /**
  * Utility functions for sanitizing log output
  */

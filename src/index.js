@@ -1,7 +1,7 @@
 require('dotenv').config();
 const Server = require('./server');
 const WhatsAppClient = require('./whatsapp/client');
-const PrintQueue = require('./print/queue');
+const printQueue = require('./print/queue');
 const config = require('../config');
 const { ensureDirectoriesExist } = require('./utils/fileSystem');
 
@@ -12,8 +12,7 @@ async function start() {
         // Ensure required directories exist
         await ensureDirectoriesExist();
         
-        // Initialize print queue first
-        const printQueue = new PrintQueue();
+        // Initialize print queue (singleton)
         console.log('✅ Print queue initialized');
         
         // Initialize WhatsApp client but do NOT auto-connect.

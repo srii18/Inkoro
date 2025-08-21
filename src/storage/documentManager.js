@@ -125,6 +125,11 @@ class DocumentManager {
             throw error;
         }
     }
+
+    // Backward compatible alias used by server route
+    async clearRecentDocuments() {
+        return this.clearAllDocuments();
+    }
 }
 
 module.exports = new DocumentManager(); 

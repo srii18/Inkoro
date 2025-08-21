@@ -140,11 +140,12 @@ class WhatsAppClient extends EventEmitter {
                     if (this.qrTimeoutHandle) clearTimeout(this.qrTimeoutHandle);
                     this.qrTimeoutHandle = setTimeout(() => {
                         if (this.qrCode && this.isQRExpired()) {
+                            // Do not emit null rapidly; allow frontend to explicitly
+                            // request a fresh QR when needed via API.
                             this.qrCode = null;
                             this.qrTimestamp = null;
-                            this.emit('qr', null); // Notify QR expired
                         }
-                    }, this.qrTimeoutMs);
+                    }, this.qrTimeoutMs + 5000);
                     return;
                 }
                 if (connection === 'close') {
@@ -439,8 +440,9 @@ class WhatsAppClient extends EventEmitter {
                 fileSize: fileData.size
             };
 
-            // Store as pending job
+            // Store as pending job and notify dashboard via event
             this.setPendingJob(sender, pendingJob);
+            this.emit('newDocument', { ...savedDoc, size: fileData.size });
 
             // Send confirmation and ask for instructions
             await this.sendMessage(sender, 
@@ -487,14 +489,21 @@ class WhatsAppClient extends EventEmitter {
 
             // Cancel job command
             if (text === 'cancel job') {
-                // Find the user's most recent pending job
-                const queue = printQueue.queue || [];
-                const userJob = queue.find(j => j.sender === sender && (j.status === 'pending' || j.status === 'queued'));
-                if (userJob) {
-                    await printQueue.removeJob(userJob.id);
-                    await this.sendMessage(sender, '❌ Your print job has been cancelled.');
-                } else {
-                    await this.sendMessage(sender, 'No pending print job found to cancel.');
+                try {
+                    const queueInstance = require('../print/queue');
+                    const jobs = Array.from(queueInstance.jobs.values());
+                    const userJob = jobs
+                        .filter(j => (j.status === 'queued' || j.status === 'pending') && j.data && j.data.sender === sender)
+                        .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))[0];
+                    if (userJob) {
+                        await queueInstance.removeJob(userJob.id);
+                        await this.sendMessage(sender, '❌ Your print job has been cancelled.');
+                    } else {
+                        await this.sendMessage(sender, 'No pending print job found to cancel.');
+                    }
+                } catch (e) {
+                    console.error('Error cancelling job for user:', e);
+                    await this.sendMessage(sender, '❌ Failed to cancel job. Please try again.');
                 }
                 return;
             }
@@ -898,11 +907,11 @@ class WhatsAppClient extends EventEmitter {
     }
 
     async monitorJobStatus(jobId, recipient) {
-        const printQueue = require('../queue/printQueue');
+        const printQueue = require('../print/queue');
         const checkStatus = async () => {
             try {
                 const status = await printQueue.getJobStatus(jobId);
-                if (status.state === 'completed') {
+                if (status.status === 'completed') {
                     await this.sendMessage(recipient,
                         `✅ Your print job is ready!\n` +
                         `Job ID: ${jobId}\n` +
@@ -910,7 +919,7 @@ class WhatsAppClient extends EventEmitter {
                     );
                     return;
                 }
-                if (status.state === 'failed') {
+                if (status.status === 'failed') {
                     await this.sendMessage(recipient,
                         `❌ Your print job failed.\n` +
                         `Job ID: ${jobId}\n` +
@@ -948,9 +957,10 @@ class WhatsAppClient extends EventEmitter {
     async getQueueMessage(sender, job) {
         try {
             const printQueue = require('../print/queue');
-            const queue = printQueue.queue || [];
-            // Find the user's job in the queue
-            const idx = queue.findIndex(j => j.id === job.id);
+            const queued = Array.from(printQueue.jobs.values())
+                .filter(j => j.status === 'queued')
+                .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+            const idx = queued.findIndex(j => j.id === job.id);
             if (idx === -1) return 'Your job is in the queue. ETA: unknown. Type "cancel job" to cancel.';
             const position = idx + 1;
             // Estimate ETA: assume 2 minutes per job (very rough)
