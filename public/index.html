@@ -198,15 +198,84 @@
                 socket.addEventListener('message', (event) => {
                     try {
                         const data = JSON.parse(event.data);
-                        console.log('WebSocket message received:', data.event);
-                        if (data.event === 'whatsapp_status_update' && data.status) {
-                            updateWhatsAppStatus(data.status);
-                                } else if (data.event === 'new_document') {
-                            // refresh recent docs
-                            pollUpdates();
+                        console.log('WebSocket message received:', data.event, data);
+                        
+                        switch (data.event) {
+                            case 'whatsapp_status_update':
+                                if (data.status) {
+                                    updateWhatsAppStatus(data.status);
+                                }
+                                break;
+                                
+                            case 'whatsapp_qr':
+                                if (data.qr) {
+                                    console.log('WhatsApp QR code received via WebSocket');
+                                    showQRCode(data.qr);
+                                }
+                                break;
+                                
+                            case 'new_document':
+                                console.log('New document received');
+                                // Refresh recent documents
+                                pollDocuments();
+                                showNotification('New document received', 'success');
+                                break;
+                                
+                            // Print job events
+                            case 'print_job_added':
+                                console.log('Print job added:', data.job);
+                                addJobToUI(data.job);
+                                showNotification(`New print job: ${data.job.id}`, 'info');
+                                break;
+                                
+                            case 'print_job_updated':
+                                console.log('Print job updated:', data.job);
+                                updateJobInUI(data.job);
+                                break;
+                                
+                            case 'print_job_completed':
+                                console.log('Print job completed:', data.job);
+                                updateJobInUI(data.job);
+                                showNotification(`Print job ${data.job.id} completed`, 'success');
+                                break;
+                                
+                            case 'print_job_failed':
+                                console.log('Print job failed:', data.job);
+                                updateJobInUI(data.job);
+                                showNotification(`Print job ${data.job.id} failed: ${data.job.error || 'Unknown error'}`, 'error');
+                                break;
+                                
+                            case 'print_job_removed':
+                                console.log('Print job removed:', data.jobId);
+                                removeJobFromUI(data.jobId);
+                                break;
+                                
+                            case 'queue_stats_updated':
+                                console.log('Queue stats updated:', data.stats);
+                                updateQueueStats(data.stats);
+                                break;
+                                
+                            case 'initial_queue_data':
+                                console.log('Initial queue data received');
+                                updatePrintJobs(data.jobs);
+                                if (data.stats) {
+                                    updateQueueStats(data.stats);
+                                }
+                                break;
+                                
+                            case 'queue_update':
+                                console.log('Queue update received');
+                                updatePrintJobs(data.jobs);
+                                if (data.stats) {
+                                    updateQueueStats(data.stats);
+                                }
+                                break;
+                                
+                            default:
+                                console.log('Unknown WebSocket event:', data.event);
                         }
                     } catch (e) {
-                        console.log('Non-JSON WS message:', event.data);
+                        console.log('Non-JSON WS message or parsing error:', event.data, e);
                     }
                 });
 
@@ -714,12 +783,121 @@
                 const result = await response.json();
                 if (result.success) {
                     showNotification('Job cancelled successfully', 'success');
-                    pollUpdates(); // Refresh the display
+                    pollPrintJobs(); // Refresh the display
                 } else {
                     showNotification('Failed to cancel job: ' + result.error, 'error');
                 }
             } catch (error) {
                 showNotification('Error cancelling job: ' + error.message, 'error');
+            }
+        }
+
+        // Add these new functions for real-time job updates:
+
+        function addJobToUI(job) {
+            const container = document.getElementById('printJobs');
+            const existingJob = document.querySelector(`[data-job-id="${job.id}"]`);
+            
+            if (existingJob) {
+                // Update existing job instead of adding duplicate
+                updateJobInUI(job);
+                return;
+            }
+            
+            const jobElement = createJobElement(job);
+            
+            // Add to top of the list
+            if (container.firstChild && container.firstChild.tagName !== 'P') {
+                container.insertBefore(jobElement, container.firstChild);
+            } else {
+                // Remove "no jobs" message if present
+                if (container.innerHTML.includes('No print jobs')) {
+                    container.innerHTML = '';
+                }
+                container.appendChild(jobElement);
+            }
+        }
+
+        function updateJobInUI(job) {
+            const existingJob = document.querySelector(`[data-job-id="${job.id}"]`);
+            if (existingJob) {
+                // Replace with updated job element
+                const newJobElement = createJobElement(job);
+                existingJob.replaceWith(newJobElement);
+            } else {
+                // Job doesn't exist, add it
+                addJobToUI(job);
+            }
+        }
+
+        function removeJobFromUI(jobId) {
+            const jobElement = document.querySelector(`[data-job-id="${jobId}"]`);
+            if (jobElement) {
+                jobElement.remove();
+                
+                // Check if container is empty
+                const container = document.getElementById('printJobs');
+                if (container.children.length === 0) {
+                    container.innerHTML = '<p class="text-gray-500 text-center">No print jobs</p>';
+                }
+            }
+        }
+
+        function createJobElement(job) {
+            const jobElement = document.createElement('div');
+            jobElement.className = 'border rounded-lg p-4';
+            jobElement.setAttribute('data-job-id', job.id);
+            
+            jobElement.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <div>
+                        <h3 class="font-medium">Job #${job.id}</h3>
+                        <p class="text-sm text-gray-500">Created: ${new Date(job.createdAt).toLocaleString()}</p>
+                        ${job.batchKey && job.batchKey !== 'N/A' ? `<p class="text-sm text-blue-600">Batch: ${job.batchKey}</p>` : ''}
+                        ${job.data && job.data.fileName ? `<p class="text-sm text-gray-600">File: ${job.data.fileName}</p>` : ''}
+                        ${job.acceptedBy ? `<p class="text-sm text-green-600">Accepted by: ${job.acceptedBy}</p>` : ''}
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span class="status-badge status-${job.status}">${job.status}</span>
+                        ${job.status === 'queued' ? 
+                            `<button onclick="acceptJob('${job.id}')" 
+                                    class="px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700 text-xs">Accept</button>` : 
+                            ''}
+                        ${job.status === 'queued' || job.status === 'processing' ? 
+                            `<button onclick="cancelJob('${job.id}')" 
+                                    class="px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600 text-xs">Cancel</button>` : 
+                            ''}
+                        ${job.status === 'failed' ? 
+                            `<button onclick="retryJob('${job.id}')" 
+                                    class="px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs">Retry</button>` : 
+                            ''}
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <div class="w-full bg-gray-200 rounded-full h-2">
+                        <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: ${job.progress || 0}%"></div>
+                    </div>
+                    <div class="flex justify-between text-xs text-gray-500 mt-1">
+                        <span>Progress: ${job.progress || 0}%</span>
+                        <span>Updated: ${new Date(job.updatedAt || job.createdAt).toLocaleTimeString()}</span>
+                    </div>
+                </div>
+                ${job.error ? `<div class="mt-2 p-2 bg-red-50 border border-red-200 rounded"><p class="text-sm text-red-600">Error: ${job.error}</p></div>` : ''}
+                ${job.result ? `<div class="mt-2 p-2 bg-green-50 border border-green-200 rounded"><p class="text-sm text-green-600">Result: ${job.result}</p></div>` : ''}
+            `;
+            
+            return jobElement;
+        }
+
+        function updateQueueStats(stats) {
+            // You can add a stats display section if needed
+            console.log('Queue stats:', stats);
+            
+            // Update page title with queue info
+            if (stats && stats.pending > 0) {
+                document.title = `Inkoro (${stats.pending} pending)`;
+            } else {
+                document.title = 'Inkoro';
             }
         }
 
@@ -734,7 +912,7 @@
                 const result = await response.json();
                 if (result.success) {
                     showNotification('Job accepted. It will be printed.', 'success');
-                    pollUpdates();
+                    pollPrintJobs();
                 } else {
                     showNotification('Failed to accept job: ' + (result.error || 'Unknown error'), 'error');
                 }
@@ -751,7 +929,7 @@
                 const result = await response.json();
                 if (result.success) {
                     showNotification('Job retried successfully', 'success');
-                    pollUpdates(); // Refresh the display
+                    pollPrintJobs(); // Refresh the display
                 } else {
                     showNotification('Failed to retry job: ' + result.error, 'error');
                 }
@@ -779,7 +957,7 @@
         // Additional utility functions
         async function refreshJobs() {
             showNotification('Refreshing jobs...', 'info');
-            await pollUpdates();
+            await pollPrintJobs();
         }
 
         async function clearCompletedJobs() {
@@ -790,7 +968,7 @@
                 const result = await response.json();
                 if (result.success) {
                     showNotification('Completed jobs cleared', 'success');
-                    pollUpdates();
+                    pollPrintJobs();
                 } else {
                     showNotification('Failed to clear completed jobs: ' + result.error, 'error');
                 }
@@ -808,7 +986,7 @@
                 const result = await response.json();
                 if (result.success) {
                     showNotification('All documents deleted', 'success');
-                    pollUpdates();
+                    pollDocuments();
                 } else {
                     showNotification('Failed to delete documents: ' + (result.error || 'Unknown error'), 'error');
                 }
@@ -824,7 +1002,7 @@
                 const result = await response.json();
                 if (result.success) {
                     showNotification('Document deleted', 'success');
-                    pollUpdates();
+                    pollDocuments();
                 } else {
                     showNotification('Failed to delete document: ' + (result.error || 'Unknown error'), 'error');
                 }
@@ -839,7 +1017,17 @@
 
         async function pollUpdatesWithErrorHandling() {
             try {
-                await pollUpdates();
+                // Only poll for data that doesn't come through WebSocket
+                await Promise.all([
+                    pollPrinterStatus(),
+                    pollDocuments() // Documents still need polling unless you add WebSocket events for them
+                ]);
+                
+                // Only poll print jobs if WebSocket is not connected
+                if (!socket || socket.readyState !== WebSocket.OPEN) {
+                    await pollPrintJobs();
+                }
+                
                 pollErrorCount = 0; // Reset error count on success
             } catch (error) {
                 pollErrorCount++;
@@ -854,8 +1042,27 @@
             }
         }
 
+        // Separate polling functions for better control
+        async function pollPrinterStatus() {
+            const printerResponse = await fetch('/api/printer/status');
+            const printerStatus = await printerResponse.json();
+            updatePrinterStatus(printerStatus);
+        }
+
+        async function pollPrintJobs() {
+            const jobsResponse = await fetch('/api/queue');
+            const jobsData = await jobsResponse.json();
+            updatePrintJobs(jobsData.jobs);
+        }
+
+        async function pollDocuments() {
+            const docsResponse = await fetch('/api/documents/recent');
+            const docsData = await docsResponse.json();
+            updateRecentDocuments(docsData);
+        }
+
         // Start polling for updates with error handling
-        let pollInterval = setInterval(pollUpdatesWithErrorHandling, 5000);
+        let pollInterval = setInterval(pollUpdatesWithErrorHandling, 10000); // Reduced frequency since WebSocket handles real-time updates
         pollUpdatesWithErrorHandling();
 
         // Initialize connection status check

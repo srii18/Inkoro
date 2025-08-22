@@ -17,6 +17,7 @@ class Server extends EventEmitter {
         this.setupRoutes();
         this.setupAPIRoutes();
         this.setupWhatsAppEventBridge();
+        this.setupPrintQueueEventBridge(); // Add this line
     }
 
     setupMiddleware() {
@@ -373,6 +374,55 @@ class Server extends EventEmitter {
         });
     }
 
+    setupPrintQueueEventBridge() {
+        if (!this.printQueue) return;
+        
+        const safeBroadcast = (payload) => {
+            const data = JSON.stringify(payload);
+            console.log('Broadcasting to', this.wsClients.size, 'clients:', payload.event);
+            for (const ws of this.wsClients) {
+                try { 
+                    if (ws.readyState === 1) { // WebSocket.OPEN
+                        ws.send(data); 
+                    }
+                } catch (e) {
+                    console.error('Error broadcasting to client:', e.message);
+                }
+            }
+        };
+
+        // Listen to print queue events and broadcast them
+        this.printQueue.on('jobAdded', (job) => {
+            console.log('Print queue: Job added', job.id);
+            safeBroadcast({ event: 'print_job_added', job });
+        });
+
+        this.printQueue.on('jobUpdated', (job) => {
+            console.log('Print queue: Job updated', job.id, job.status);
+            safeBroadcast({ event: 'print_job_updated', job });
+        });
+
+        this.printQueue.on('jobCompleted', (job) => {
+            console.log('Print queue: Job completed', job.id);
+            safeBroadcast({ event: 'print_job_completed', job });
+        });
+
+        this.printQueue.on('jobFailed', (job) => {
+            console.log('Print queue: Job failed', job.id);
+            safeBroadcast({ event: 'print_job_failed', job });
+        });
+
+        this.printQueue.on('jobRemoved', (jobId) => {
+            console.log('Print queue: Job removed', jobId);
+            safeBroadcast({ event: 'print_job_removed', jobId });
+        });
+
+        this.printQueue.on('queueStats', (stats) => {
+            console.log('Print queue: Stats updated', stats);
+            safeBroadcast({ event: 'queue_stats_updated', stats });
+        });
+    }
+
     // QR management is now handled by QRManager class
 
     start(port) {
@@ -411,35 +461,104 @@ class Server extends EventEmitter {
         this.wss.on('connection', (ws) => {
             console.log('New WebSocket connection');
             this.wsClients.add(ws);
+            
             // Send initial status to the newly connected client
             try {
                 if (this.whatsapp) {
                     const status = this.whatsapp.getStatus();
                     ws.send(JSON.stringify({ event: 'whatsapp_status_update', status }));
                 }
-            } catch (_) {}
+                
+                // Send initial print queue data
+                if (this.printQueue) {
+                    this.printQueue.getQueueStatus().then(queueStatus => {
+                        const stats = this.printQueue.getStats();
+                        ws.send(JSON.stringify({ 
+                            event: 'initial_queue_data', 
+                            jobs: queueStatus.jobs, 
+                            stats 
+                        }));
+                    }).catch(err => {
+                        console.error('Error sending initial queue data:', err);
+                    });
+                }
+            } catch (err) {
+                console.error('Error sending initial data to WebSocket client:', err);
+            }
             
             ws.on('message', (message) => {
                 try {
                     const { summary } = sanitizeLog(String(message));
                     console.log('Received WS message:', summary);
+                    
                     // Try to parse commands
                     let parsed = null;
-                    try { parsed = JSON.parse(String(message)); } catch {}
-                                            // QR requests are now handled via API endpoint /api/whatsapp/qr
-                        // WebSocket is only used for status updates
-                        if (parsed && parsed.action === 'request_whatsapp_qr') {
-                            console.log('QR request received via WebSocket - use API endpoint instead');
+                    try { 
+                        parsed = JSON.parse(String(message)); 
+                    } catch {}
+                    
+                    // Handle WebSocket commands
+                    if (parsed) {
+                        switch (parsed.action) {
+                            case 'request_queue_update':
+                                console.log('Queue update requested via WebSocket');
+                                this.sendQueueUpdate(ws);
+                                break;
+                            case 'request_whatsapp_qr':
+                                console.log('QR request received via WebSocket - use API endpoint instead');
+                                break;
                         }
+                    }
                 } catch {
                     console.log('Received WS message: [unreadable]');
                 }
             });
 
             ws.on('close', () => {
+                console.log('WebSocket connection closed');
+                this.wsClients.delete(ws);
+            });
+
+            ws.on('error', (error) => {
+                console.error('WebSocket error:', error);
                 this.wsClients.delete(ws);
             });
         });
+    }
+
+    // Add helper method to send queue updates
+    async sendQueueUpdate(ws = null) {
+        if (!this.printQueue) return;
+        
+        try {
+            const queueStatus = await this.printQueue.getQueueStatus();
+            const stats = this.printQueue.getStats();
+            const payload = JSON.stringify({ 
+                event: 'queue_update', 
+                jobs: queueStatus.jobs, 
+                stats 
+            });
+            
+            if (ws) {
+                // Send to specific client
+                if (ws.readyState === 1) {
+                    ws.send(payload);
+                }
+            } else {
+                // Broadcast to all clients
+                for (const client of this.wsClients) {
+                    try {
+                        if (client.readyState === 1) {
+                            client.send(payload);
+                        }
+                    } catch (e) {
+                        console.error('Error sending queue update:', e.message);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error preparing queue update:', error);
+        }
     }
 }
 
