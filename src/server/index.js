@@ -99,26 +99,57 @@ class Server extends EventEmitter {
             }
         });
 
-        // Simple QR endpoint using QR Manager
+        // Enhanced QR endpoint with better error handling and caching
         this.app.get('/api/whatsapp/qr', async (req, res) => {
             try {
                 if (!this.qrManager) {
                     return res.json({ success: false, error: 'QR Manager not initialized' });
                 }
                 
+                // Check if WhatsApp is already connected
+                if (this.whatsapp) {
+                    const status = this.whatsapp.getStatus();
+                    if (status.isConnected) {
+                        return res.json({ 
+                            success: false, 
+                            error: 'Already connected to WhatsApp',
+                            connected: true 
+                        });
+                    }
+                }
+                
                 console.log('QR API called, QR Manager status:', this.qrManager.getStatus());
                 
-                const qrCode = await this.qrManager.getQR();
+                // Add request timeout
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('QR request timeout')), 12000);
+                });
+                
+                const qrPromise = this.qrManager.getQR();
+                const qrCode = await Promise.race([qrPromise, timeoutPromise]);
                 
                 if (qrCode) {
-                    res.json({ success: true, qr: qrCode });
+                    const remainingTime = this.qrManager.getRemainingTime();
+                    res.json({ 
+                        success: true, 
+                        qr: qrCode,
+                        expiresIn: Math.floor(remainingTime / 1000), // seconds
+                        generatedAt: Date.now()
+                    });
                 } else {
-                    res.json({ success: false, message: 'QR code not available' });
+                    res.json({ 
+                        success: false, 
+                        message: 'QR code not available. Please try connecting first.' 
+                    });
                 }
                 
             } catch (error) {
                 console.error('QR API error:', error);
-                res.status(500).json({ success: false, error: error.message });
+                res.status(500).json({ 
+                    success: false, 
+                    error: error.message,
+                    timeout: error.message.includes('timeout')
+                });
             }
         });
 

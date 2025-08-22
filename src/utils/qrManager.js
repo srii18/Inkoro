@@ -10,7 +10,8 @@ class QRManager {
         this.qrLifetime = 120000; // 120 seconds to match WhatsApp client
         this.isGenerating = false;
         this.lastQRUpdate = 0;
-        this.qrUpdateDebounce = 1000; // Reduced to 1 second debounce
+        this.qrUpdateDebounce = 3000; // Increased to 3 seconds to prevent rapid updates
+        this.pendingRequests = []; // Queue for pending QR requests
         
         // Listen for QR codes from WhatsApp client
         if (this.whatsappClient) {
@@ -25,15 +26,15 @@ class QRManager {
     handleNewQR(qr) {
         const now = Date.now();
         
-        // Debounce rapid QR updates
-        if (now - this.lastQRUpdate < this.qrUpdateDebounce) {
-            console.log('QR Manager: QR update too soon, ignoring (debounced)');
+        // Only update if this is actually a new QR
+        if (this.currentQR === qr) {
+            console.log('QR Manager: Same QR received, ignoring duplicate');
             return;
         }
         
-        // Only update if this is actually a new QR
-        if (this.currentQR === qr) {
-            console.log('QR Manager: Same QR received, ignoring');
+        // Debounce rapid QR updates more aggressively
+        if (now - this.lastQRUpdate < this.qrUpdateDebounce) {
+            console.log('QR Manager: QR update too soon, ignoring (debounced)');
             return;
         }
         
@@ -48,17 +49,34 @@ class QRManager {
             clearTimeout(this.qrTimeout);
         }
         
-        // Set new timeout
+        // Set new timeout with buffer time (115 seconds instead of 120)
         this.qrTimeout = setTimeout(() => {
             console.log('QR Manager: QR expired after timeout');
             this.currentQR = null;
             this.qrGeneratedAt = null;
-        }, this.qrLifetime);
+        }, 115000); // 5 second buffer before actual expiry
+        
+        // Resolve any pending requests
+        this.resolvePendingRequests(qr);
+    }
+    
+    resolvePendingRequests(qr) {
+        const requests = this.pendingRequests.splice(0); // Clear the array
+        requests.forEach(({ resolve }) => {
+            resolve(qr);
+        });
+    }
+    
+    rejectPendingRequests(error) {
+        const requests = this.pendingRequests.splice(0); // Clear the array
+        requests.forEach(({ reject }) => {
+            reject(error);
+        });
     }
     
     async getQR() {
-        // If we have a valid QR, return it
-        if (this.isQRValid()) {
+        // If we have a valid QR with good remaining time, return it
+        if (this.isQRValid() && this.getRemainingTime() > 10000) { // At least 10 seconds left
             console.log('QR Manager: Returning existing valid QR');
             return this.currentQR;
         }
@@ -72,6 +90,12 @@ class QRManager {
         // Generate new QR
         console.log('QR Manager: Generating new QR');
         return this.generateNewQR();
+    }
+    
+    getRemainingTime() {
+        if (!this.qrGeneratedAt) return 0;
+        const age = Date.now() - this.qrGeneratedAt;
+        return Math.max(0, this.qrLifetime - age);
     }
     
     isQRValid() {
@@ -93,8 +117,13 @@ class QRManager {
         console.log('QR Manager: Starting new QR generation');
         
         try {
-            // Don't clear old QR immediately - keep it until new one is ready
-            // This prevents flickering between old and new QR
+            // Clear old QR only when starting generation
+            this.currentQR = null;
+            this.qrGeneratedAt = null;
+            if (this.qrTimeout) {
+                clearTimeout(this.qrTimeout);
+                this.qrTimeout = null;
+            }
             
             // Force WhatsApp to generate new QR
             if (this.whatsappClient && typeof this.whatsappClient.forceQR === 'function') {
@@ -102,46 +131,44 @@ class QRManager {
             }
             
             // Wait for QR to be generated
-            const newQR = await this.waitForQR(10000); // 10 second timeout
-            
-            // Only update if we got a new QR
-            if (newQR && newQR !== this.currentQR) {
-                console.log('QR Manager: New QR received, updating');
-                this.handleNewQR(newQR);
-            }
-            
+            const newQR = await this.waitForQR(15000); // 15 second timeout
             return newQR;
             
         } catch (error) {
             console.error('QR Manager: Error generating QR:', error);
             this.isGenerating = false;
+            this.rejectPendingRequests(error);
             throw error;
         }
     }
     
-    waitForQR(timeout = 10000) {
+    waitForQR(timeout = 15000) {
         return new Promise((resolve, reject) => {
-            const startTime = Date.now();
+            // Add to pending requests
+            this.pendingRequests.push({ resolve, reject });
             
-            const checkQR = () => {
-                // Check if QR is available
-                if (this.currentQR) {
-                    resolve(this.currentQR);
-                    return;
+            // Set timeout for this specific request
+            const timeoutId = setTimeout(() => {
+                // Remove this request from pending
+                const index = this.pendingRequests.findIndex(req => req.resolve === resolve);
+                if (index !== -1) {
+                    this.pendingRequests.splice(index, 1);
                 }
                 
-                // Check timeout
-                if (Date.now() - startTime > timeout) {
-                    this.isGenerating = false;
-                    reject(new Error('QR generation timeout'));
-                    return;
-                }
-                
-                // Check again in 500ms
-                setTimeout(checkQR, 500);
-            };
+                this.isGenerating = false;
+                reject(new Error('QR generation timeout'));
+            }, timeout);
             
-            checkQR();
+            // If QR is already available, resolve immediately
+            if (this.currentQR) {
+                clearTimeout(timeoutId);
+                // Remove from pending
+                const index = this.pendingRequests.findIndex(req => req.resolve === resolve);
+                if (index !== -1) {
+                    this.pendingRequests.splice(index, 1);
+                }
+                resolve(this.currentQR);
+            }
         });
     }
     
@@ -155,6 +182,9 @@ class QRManager {
             clearTimeout(this.qrTimeout);
             this.qrTimeout = null;
         }
+        
+        // Reject any pending requests
+        this.rejectPendingRequests(new Error('QR cleared'));
     }
     
     getStatus() {
@@ -162,7 +192,9 @@ class QRManager {
             hasQR: !!this.currentQR,
             isGenerating: this.isGenerating,
             qrAge: this.qrGeneratedAt ? Date.now() - this.qrGeneratedAt : null,
-            qrValid: this.isQRValid()
+            qrValid: this.isQRValid(),
+            remainingTime: this.getRemainingTime(),
+            pendingRequests: this.pendingRequests.length
         };
     }
 }
