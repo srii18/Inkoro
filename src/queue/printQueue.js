@@ -39,8 +39,8 @@ class PrintQueue extends EventEmitter {
         this.isProcessing = false;
         PrintQueue.instance = this;
 
-        // Start the batch processing loop
-        setInterval(() => this._processBatches(), BATCH_INTERVAL);
+        // Start the batch processing loop - disabled for manual job acceptance
+        // setInterval(() => this._processBatches(), BATCH_INTERVAL);
     }
 
     async addJob(jobData) {
@@ -224,6 +224,27 @@ class PrintQueue extends EventEmitter {
         job.error = null;
         job.updatedAt = new Date();
         this.emit('statusUpdated', { jobId: job.id, status: job.status, progress: job.progress });
+        return job;
+    }
+
+    async acceptJob(jobId, acceptedBy = null) {
+        const job = this.jobs.get(jobId);
+        if (!job) {
+            throw new Error('Job not found');
+        }
+        if (job.status !== 'queued' && job.status !== 'pending') {
+            throw new Error('Only queued or pending jobs can be accepted');
+        }
+        job.status = 'processing';
+        job.acceptedBy = acceptedBy;
+        job.updatedAt = new Date();
+        this.emit('statusUpdated', { jobId: job.id, status: job.status });
+
+        // Start processing the accepted job immediately
+        this._executeJob(job).catch(error => {
+            console.error('Error processing accepted job:', error);
+        });
+
         return job;
     }
 

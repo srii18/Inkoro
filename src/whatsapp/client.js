@@ -38,8 +38,8 @@ class WhatsAppClient extends EventEmitter {
             : path.join(process.cwd(), config.whatsappAuthPath);
         this.initializeAuthFolder();
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 5; // Increased from 3
-        this.reconnectDelay = 15000; // Reduced from 10 seconds
+        this.maxReconnectAttempts = 3; // Reduced from 5
+        this.reconnectDelay = 30000; // Increased to 30 seconds
         this.isConnecting = false;
         this.pendingJobs = new Map();
         this.qrTimeoutHandle = null;
@@ -327,7 +327,7 @@ class WhatsAppClient extends EventEmitter {
     }
 
     startHealthCheck() {
-        // Check connection health every 30 seconds
+        // Check connection health every 60 seconds (reduced frequency)
         setInterval(async () => {
             try {
                 if (this.client && this.connectionStatus === 'connected') {
@@ -337,16 +337,16 @@ class WhatsAppClient extends EventEmitter {
                         return;
                     }
                 }
-                
-                // Connection seems unhealthy, try to recover
-                if (this.connectionStatus === 'disconnected' || this.connectionStatus === 'failed') {
+
+                // Connection seems unhealthy, try to recover (only if not already attempting)
+                if ((this.connectionStatus === 'disconnected' || this.connectionStatus === 'failed') && !this.isConnecting) {
                     console.log('Connection unhealthy, attempting recovery...');
                     await this.recoverConnection();
                 }
             } catch (error) {
                 console.error('Health check error:', error);
             }
-        }, 30000); // 30 seconds
+        }, 60000); // 60 seconds - reduced frequency
     }
 
     async handleIncomingMessage(message) {
@@ -402,13 +402,31 @@ class WhatsAppClient extends EventEmitter {
                 console.log('Skipping document processing: WhatsApp not connected');
                 return;
             }
-            
+
             const documentManager = require('../storage/documentManager');
             const document = message.message.documentMessage;
             const fileName = document.fileName || `document_${Date.now()}.${document.mimetype ? document.mimetype.split('/').pop() : 'pdf'}`;
             const sender = message.key.remoteJid;
-            
+
             console.log(`📄 Document received: ${fileName} from ${sender}`);
+
+            // Activate session for this user
+            let session = this.userSessions.get(sender);
+            if (!session) {
+                session = { active: false, timeout: null };
+                this.userSessions.set(sender, session);
+            }
+            if (!session.active) {
+                session.active = true;
+                this.userSessions.set(sender, session);
+            }
+            // Reset timeout
+            if (session.timeout) clearTimeout(session.timeout);
+            session.timeout = setTimeout(() => {
+                session.active = false;
+                this.userSessions.set(sender, session);
+                this.sendMessage(sender, '⏳ Session timed out. Send "hi" to start again.');
+            }, this.SESSION_TIMEOUT_MS);
 
             // Download the document first
             const fileData = await this.downloadDocument(
@@ -423,7 +441,7 @@ class WhatsAppClient extends EventEmitter {
 
             // Save document to storage
             const savedDoc = await documentManager.saveDocument(fileData.buffer, fileName);
-            
+
             // Create a pending job for this document
             const pendingJob = {
                 fileId: savedDoc.fileId,
@@ -445,7 +463,7 @@ class WhatsAppClient extends EventEmitter {
             this.emit('newDocument', { ...savedDoc, size: fileData.size });
 
             // Send confirmation and ask for instructions
-            await this.sendMessage(sender, 
+            await this.sendMessage(sender,
                 `✅ Document received: ${fileName}\n` +
                 `📊 Size: ${Math.round(fileData.size / 1024)}KB\n\n` +
                 `📋 Please reply with your print instructions:\n` +
@@ -461,7 +479,7 @@ class WhatsAppClient extends EventEmitter {
             console.error('Error handling document message:', error);
             try {
                 await this.sendMessage(
-                    message.key.remoteJid, 
+                    message.key.remoteJid,
                     `❌ Error processing document: ${error.message}\n\n` +
                     'Please try sending the file again or contact support if the problem persists.'
                 );
@@ -490,7 +508,7 @@ class WhatsAppClient extends EventEmitter {
             // Cancel job command
             if (text === 'cancel job') {
                 try {
-                    const queueInstance = require('../print/queue');
+                    const queueInstance = require('../queue/printQueue');
                     const jobs = Array.from(queueInstance.jobs.values());
                     const userJob = jobs
                         .filter(j => (j.status === 'queued' || j.status === 'pending') && j.data && j.data.sender === sender)
@@ -529,31 +547,15 @@ class WhatsAppClient extends EventEmitter {
                 await this.sendMessage(sender, '👋 Session ended. Type "hi" to start again.');
                 return;
             }
-            // Code message to start sequence
-            if (!session.active) {
-                if (text === this.CODE_MESSAGE) {
-                    session.active = true;
-                    this.userSessions.set(sender, session);
-                    await this.sendMessage(sender,
-                        '👋 Welcome to Inkoro (your friendly photocopy optimizer)!\n\n' +
-                        '📄 Send me a document to print\n' +
-                        '💬 Or reply to a document with instructions like:\n' +
-                        '• "2 copies"\n' +
-                        '• "Color pages 1-3"\n' +
-                        '• "A3 paper, urgent"\n' +
-                        '• "3 copies, glossy paper"\n\n' +
-                        '🆘 Need help? Just ask!\nType "exit" anytime to end this session.'
-                    );
-                } else {
-                    // Only respond to code message, ignore other texts
-                    // Optionally, you can send a minimal prompt:
-                    // await this.sendMessage(sender, 'Type "hi" to start Inkoro.');
-                }
-                return;
-            }
-            // If session is active, proceed as before
+
+            // Check for pending job first (allows processing instructions even without active session)
             const pendingJob = this.getPendingJob(sender);
             if (pendingJob) {
+                // Activate session if not already active
+                if (!session.active) {
+                    session.active = true;
+                    this.userSessions.set(sender, session);
+                }
                 // Parse instructions from text
                 const instructions = instructionParser.parse(text);
                 // Update the pending job with instructions
@@ -564,16 +566,16 @@ class WhatsAppClient extends EventEmitter {
                         ...instructions
                     }
                 };
-                
+
                 // Add job to print queue
                 try {
-                    const printQueue = require('../print/queue');
+                    const printQueue = require('../queue/printQueue');
                     const queuedJob = await printQueue.addJob(updatedJob);
                     console.log(`📋 Print job added to queue: ${queuedJob.id}`);
-                    
+
                     // Send confirmation with queue position
                     const queueMessage = await this.getQueueMessage(sender, queuedJob);
-                    await this.sendMessage(sender, 
+                    await this.sendMessage(sender,
                         `✅ Print job created!\n\n` +
                         `📄 ${updatedJob.fileName}\n` +
                         `📋 Copies: ${updatedJob.instructions.copies}\n` +
@@ -584,28 +586,50 @@ class WhatsAppClient extends EventEmitter {
                     );
                 } catch (queueError) {
                     console.error('Failed to add job to print queue:', queueError);
-                    await this.sendMessage(sender, 
+                    await this.sendMessage(sender,
                         `⚠️ Print job created but failed to add to queue: ${queueError.message}\n` +
                         `Please contact support if this issue persists.`
                     );
                 }
-                
+
                 // Emit print job event for other components
                 this.emit('printJob', updatedJob);
                 // Remove from pending jobs
                 this.removePendingJob(sender);
             } else {
-                // No pending job, prompt to send document
-                await this.sendMessage(sender, 
-                    '👋 Welcome to Inkoro (your friendly photocopy optimizer)!\n\n' +
-                    '📄 Send me a document to print\n' +
-                    '💬 Or reply to a document with instructions like:\n' +
-                    '• "2 copies"\n' +
-                    '• "Color pages 1-3"\n' +
-                    '• "A3 paper, urgent"\n' +
-                    '• "3 copies, glossy paper"\n\n' +
-                    '🆘 Need help? Just ask!\nType "exit" anytime to end this session.'
-                );
+                // Code message to start sequence
+                if (!session.active) {
+                    if (text === this.CODE_MESSAGE) {
+                        session.active = true;
+                        this.userSessions.set(sender, session);
+                        // Send detailed welcome message
+                        await this.sendMessage(sender, `👋 Welcome to Inkoro (your friendly photocopy optimizer)!
+
+📄 Send me a document to print
+💬 Or reply to a document with instructions like:
+• "2 copies"
+• "Color pages 1-3"
+• "A3 paper, urgent"
+• "3 copies, glossy paper"
+
+🆘 Need help? Just ask!
+Type "exit" anytime to end this session.`);
+                    } else {
+                        // Handle "print" command even without pending job (for testing or if job was cleared)
+                        if (text.toLowerCase() === 'print') {
+                            await this.sendMessage(sender, 'No document found to print. Please send a document first, then reply with "print" or specify your requirements.');
+                        } else if (text === 'help') {
+                            await this.sendMessage(sender, 'Tips: Send a document, then reply with instructions like "2 copies", "color pages 1-3". Type "cancel job" to cancel.');
+                        }
+                        // Only respond to code message, ignore other texts
+                    }
+                    return;
+                }
+
+                // Session is active but no pending job
+                if (text === 'help') {
+                    await this.sendMessage(sender, 'Tips: Send a document, then reply with instructions like "2 copies", "color pages 1-3". Type "cancel job" to cancel.');
+                }
             }
 
             // Handle image batch grouping and preview
@@ -639,7 +663,7 @@ class WhatsAppClient extends EventEmitter {
                         };
                         // Add job to print queue
                         try {
-                            const printQueue = require('../print/queue');
+                            const printQueue = require('../queue/printQueue');
                             const queuedJob = await printQueue.addJob(printJob);
                             console.log(`📋 Print job added to queue: ${queuedJob.id}`);
                             // Send confirmation with queue position
@@ -680,13 +704,31 @@ class WhatsAppClient extends EventEmitter {
                 console.log('Skipping image processing: WhatsApp not connected');
                 return;
             }
-            
+
             const documentManager = require('../storage/documentManager');
             const image = message.message.imageMessage;
             const fileName = `image_${Date.now()}.${image.mimetype ? image.mimetype.split('/').pop() : 'jpg'}`;
             const sender = message.key.remoteJid;
-            
+
             console.log(`🖼️ Image received from ${sender}`);
+
+            // Activate session for this user
+            let session = this.userSessions.get(sender);
+            if (!session) {
+                session = { active: false, timeout: null };
+                this.userSessions.set(sender, session);
+            }
+            if (!session.active) {
+                session.active = true;
+                this.userSessions.set(sender, session);
+            }
+            // Reset timeout
+            if (session.timeout) clearTimeout(session.timeout);
+            session.timeout = setTimeout(() => {
+                session.active = false;
+                this.userSessions.set(sender, session);
+                this.sendMessage(sender, '⏳ Session timed out. Send "hi" to start again.');
+            }, this.SESSION_TIMEOUT_MS);
 
             // Download the image
             const imageData = await this.downloadDocument(

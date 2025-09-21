@@ -191,10 +191,19 @@ class Server extends EventEmitter {
 
         this.app.delete('/api/queue/job/:jobId', async (req, res) => {
             try {
-                const { jobId } = req.params;
+                const jobId = parseInt(req.params.jobId);
                 if (!this.printQueue) throw new Error('Queue not available');
+                const job = this.printQueue.jobs.get(jobId); // Get job before removing
                 const result = await this.printQueue.removeJob(jobId);
                 if (result) {
+                    // Send WhatsApp notification to the user
+                    if (this.whatsapp && job && job.data && job.data.sender) {
+                        const message = `❌ Your print job has been cancelled.\n\n📄 ${job.data.fileName || 'Document'}\n📋 Job ID: ${jobId}\n⏰ Status: Cancelled`;
+                        this.whatsapp.sendMessage(job.data.sender, message).catch(err => {
+                            console.error('Failed to send cancel notification:', err);
+                        });
+                    }
+
                     res.json({
                         success: true,
                         message: `Job ${jobId} cancelled successfully`
@@ -215,7 +224,7 @@ class Server extends EventEmitter {
 
         this.app.post('/api/queue/job/:jobId/retry', async (req, res) => {
             try {
-                const { jobId } = req.params;
+                const jobId = parseInt(req.params.jobId);
                 if (!this.printQueue) throw new Error('Queue not available');
                 const result = await this.printQueue.retryJob(jobId);
                 if (result) {
@@ -256,10 +265,19 @@ class Server extends EventEmitter {
         // Accept job endpoint
         this.app.post('/api/queue/job/:jobId/accept', async (req, res) => {
             try {
-                const { jobId } = req.params;
+                const jobId = parseInt(req.params.jobId);
                 const acceptedBy = (req.body && req.body.acceptedBy) || 'Dashboard';
                 if (!this.printQueue) throw new Error('Queue not available');
                 const result = await this.printQueue.acceptJob(jobId, acceptedBy);
+
+                // Send WhatsApp notification to the user
+                if (this.whatsapp && result.data && result.data.sender) {
+                    const message = `✅ Your print job has been accepted and is now being processed!\n\n📄 ${result.data.fileName || 'Document'}\n📋 Job ID: ${result.id}\n⏰ Status: Processing`;
+                    this.whatsapp.sendMessage(result.data.sender, message).catch(err => {
+                        console.error('Failed to send accept notification:', err);
+                    });
+                }
+
                 res.json({ success: true, job: result });
             } catch (error) {
                 res.status(400).json({ success: false, error: error.message });
@@ -352,9 +370,9 @@ class Server extends EventEmitter {
         this.whatsapp.on('statusChange', () => {
             const status = this.whatsapp.getStatus();
             console.log('WhatsApp status changed:', status.status);
-            // Clear QR when connected
+            // Clear QR when connected (with short delay to allow frontend to fetch it)
             if (status.status === 'connected' && this.qrManager) {
-                this.qrManager.clearQR();
+                setTimeout(() => this.qrManager.clearQR(), 1000);
             }
             safeBroadcast({ event: 'whatsapp_status_update', status });
         });
@@ -469,10 +487,10 @@ class Server extends EventEmitter {
                     ws.send(JSON.stringify({ event: 'whatsapp_status_update', status }));
                 }
                 
-                // Send initial print queue data
-                if (this.printQueue) {
+                // Send initial print queue data (only if API supports it)
+                if (this.printQueue && typeof this.printQueue.getQueueStatus === 'function') {
                     this.printQueue.getQueueStatus().then(queueStatus => {
-                        const stats = this.printQueue.getStats();
+                        const stats = this.printQueue.getStats ? this.printQueue.getStats() : undefined;
                         ws.send(JSON.stringify({ 
                             event: 'initial_queue_data', 
                             jobs: queueStatus.jobs, 

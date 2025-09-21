@@ -1,7 +1,7 @@
 require('dotenv').config();
 const Server = require('./server');
 const WhatsAppClient = require('./whatsapp/client');
-const printQueue = require('./print/queue');
+const printQueue = require('./queue/printQueue');
 const config = require('../config');
 const { ensureDirectoriesExist } = require('./utils/fileSystem');
 
@@ -19,15 +19,8 @@ async function start() {
         // The web dashboard's Connect button will call the API to connect.
         const whatsapp = new WhatsAppClient();
         
-        // Connect WhatsApp client to print queue
-        whatsapp.on('printJob', async (job) => {
-            try {
-                console.log('📋 Adding print job to queue:', job.fileName);
-                await printQueue.addJob(job);
-            } catch (error) {
-                console.error('Failed to add print job to queue:', error);
-            }
-        });
+        // Note: WhatsApp client now adds jobs directly to the unified queue.
+        // Avoid double-adding by not re-adding here.
         
         // Connect print queue status updates back to WhatsApp
         printQueue.on('statusUpdated', (update) => {

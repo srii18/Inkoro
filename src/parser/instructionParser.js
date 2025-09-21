@@ -61,7 +61,9 @@ class InstructionParser {
         for (const pattern of copyPatterns) {
             const match = text.match(pattern);
             if (match) {
-                return parseInt(match[1]);
+                const copies = parseInt(match[1]);
+                // Limit copies to maximum 100
+                return Math.min(Math.max(copies, 1), 100);
             }
         }
 

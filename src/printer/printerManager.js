@@ -59,15 +59,16 @@ class PrinterManager {
             // Get all installed printers from Windows
             const { stdout } = await execPromise('wmic printer get name,status');
             const lines = stdout.split('\n').filter(line => line.trim() && !line.includes('Name'));
-            
+
+            const previousCount = this.availablePrinters.size;
             this.availablePrinters.clear();
-            
+
             for (const line of lines) {
                 const parts = line.trim().split(/\s+/);
                 if (parts.length >= 2) {
                     const printerName = parts.slice(0, -1).join(' ');
                     const status = parts[parts.length - 1];
-                    
+
                     // Check if this printer is in our configured list
                     if (this.printerConfig[printerName]) {
                         this.availablePrinters.set(printerName, {
@@ -79,8 +80,11 @@ class PrinterManager {
                     }
                 }
             }
-            
-            console.log(`📊 Discovered ${this.availablePrinters.size} configured printers`);
+
+            // Only log if the count changed or if this is the first discovery
+            if (this.availablePrinters.size !== previousCount || !this.initialized) {
+                console.log(`📊 Discovered ${this.availablePrinters.size} configured printers`);
+            }
         } catch (error) {
             console.error('Error discovering printers:', error);
         }
