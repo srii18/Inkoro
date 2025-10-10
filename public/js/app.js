@@ -381,8 +381,28 @@ function App() {
                                         </div>
                                         <div>
                                             <p className="text-sm text-gray-500">Instructions</p>
-                                            <p className="font-medium">{selectedJob.instructions}</p>
+                                            {selectedJob.data && selectedJob.data.instructions ? (
+                                                <div className="space-y-1">
+                                                    <p className="font-medium">Copies: {selectedJob.data.instructions.copies}</p>
+                                                    <p className="font-medium">Paper: {selectedJob.data.instructions.paperSize?.toUpperCase()} {selectedJob.data.instructions.paperType}</p>
+                                                    {selectedJob.data.instructions.colorPages?.length > 0 && (
+                                                        <p className="font-medium">Color pages: {selectedJob.data.instructions.colorPages.join(', ')}</p>
+                                                    )}
+                                                    <p className="font-medium">Priority: {selectedJob.data.instructions.priority}</p>
+                                                    {selectedJob.data.instructions.duplex !== undefined && (
+                                                        <p className="font-medium">Printing: {selectedJob.data.instructions.duplex ? 'Front & Back' : 'Single Side'}</p>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <p className="font-medium">None</p>
+                                            )}
                                         </div>
+                                        {selectedJob.data && selectedJob.data.instructions && selectedJob.data.instructions.duplex !== undefined && (
+                                            <div>
+                                                <p className="text-sm text-gray-500">Printing</p>
+                                                <p className="font-medium">{selectedJob.data.instructions.duplex ? 'Front & Back' : 'Single Side'}</p>
+                                            </div>
+                                        )}
                                         {selectedJob.acceptedBy && (
                                             <div>
                                                 <p className="text-sm text-gray-500">Accepted By</p>

@@ -345,6 +345,33 @@ class Server extends EventEmitter {
             }
         });
 
+        // Chat API routes
+        this.app.get('/api/whatsapp/chats', async (req, res) => {
+            try {
+                if (!this.whatsapp) {
+                    return res.json({ success: false, error: 'WhatsApp client not initialized' });
+                }
+                const chats = this.whatsapp.getChatHistory();
+                res.json({ success: true, chats });
+            } catch (error) {
+                res.status(500).json({ success: false, error: error.message });
+            }
+        });
+
+        this.app.get('/api/whatsapp/chats/:remoteJid', async (req, res) => {
+            try {
+                if (!this.whatsapp) {
+                    return res.json({ success: false, error: 'WhatsApp client not initialized' });
+                }
+                const { remoteJid } = req.params;
+                const limit = parseInt(req.query.limit) || 50;
+                const messages = this.whatsapp.getChatHistory(remoteJid, limit);
+                res.json({ success: true, remoteJid, messages });
+            } catch (error) {
+                res.status(500).json({ success: false, error: error.message });
+            }
+        });
+
         // WebSocket endpoint for Socket.IO
         this.app.get('/socket.io/socket.io.js', (req, res) => {
             res.redirect('https://cdn.socket.io/4.8.1/socket.io.min.js');
@@ -389,6 +416,11 @@ class Server extends EventEmitter {
         // New document received -> let UI refresh recent documents
         this.whatsapp.on('newDocument', (doc) => {
             safeBroadcast({ event: 'new_document', doc });
+        });
+
+        // Chat messages
+        this.whatsapp.on('chatMessage', (data) => {
+            safeBroadcast({ event: 'chat_message', ...data });
         });
     }
 

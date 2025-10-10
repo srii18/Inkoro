@@ -151,6 +151,35 @@
                     <!-- Status will be dynamically inserted here -->
                 </div>
             </div>
+
+            <!-- WhatsApp Chat Section -->
+            <div class="bg-white shadow rounded-lg p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-semibold">WhatsApp Chats</h2>
+                    <button onclick="refreshChats()" class="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm">
+                        <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <div id="chatList" class="space-y-2 mb-4 max-h-60 overflow-y-auto">
+                    <!-- Chat list will be dynamically inserted here -->
+                </div>
+                <div id="chatWindow" class="hidden border rounded-lg p-4 bg-gray-50">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 id="chatTitle" class="font-medium">Chat</h3>
+                        <button onclick="closeChat()" class="text-gray-500 hover:text-gray-700">✕</button>
+                    </div>
+                    <div id="chatMessages" class="space-y-2 max-h-80 overflow-y-auto mb-2">
+                        <!-- Messages will be dynamically inserted here -->
+                    </div>
+                    <div class="flex gap-2">
+                        <input type="text" id="chatInput" placeholder="Type a message..." class="flex-1 border rounded px-2 py-1 text-sm" onkeypress="handleChatKeyPress(event)">
+                        <button onclick="sendChatMessage()" class="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600 text-sm">Send</button>
+                    </div>
+                </div>
+            </div>
         </main>
     </div>
 
@@ -270,7 +299,17 @@
                                     updateQueueStats(data.stats);
                                 }
                                 break;
-                                
+
+                            case 'chat_message':
+                                console.log('Chat message received:', data);
+                                // Refresh chats when new message arrives
+                                refreshChats();
+                                // If chat window is open for this contact, refresh messages
+                                if (currentChatJid === data.remoteJid) {
+                                    openChat(data.remoteJid);
+                                }
+                                break;
+
                             default:
                                 console.log('Unknown WebSocket event:', data.event);
                         }
@@ -675,6 +714,7 @@
                             <p class="text-sm text-gray-500">Created: ${new Date(job.createdAt).toLocaleString()}</p>
                             ${job.batchKey && job.batchKey !== 'N/A' ? `<p class="text-sm text-blue-600">Batch: ${job.batchKey}</p>` : ''}
                             ${job.data && job.data.fileName ? `<p class="text-sm text-gray-600">File: ${job.data.fileName}</p>` : ''}
+                            ${job.data && job.data.instructions && job.data.instructions.duplex !== undefined ? `<p class="text-sm text-gray-600">Printing: ${job.data.instructions.duplex ? 'Front & Back' : 'Single Side'}</p>` : ''}
                         </div>
                         <div class="flex items-center space-x-2">
                             <span class="status-badge status-${job.status}">${job.status}</span>
@@ -856,6 +896,7 @@
                         ${job.batchKey && job.batchKey !== 'N/A' ? `<p class="text-sm text-blue-600">Batch: ${job.batchKey}</p>` : ''}
                         ${job.data && job.data.fileName ? `<p class="text-sm text-gray-600">File: ${job.data.fileName}</p>` : ''}
                         ${job.acceptedBy ? `<p class="text-sm text-green-600">Accepted by: ${job.acceptedBy}</p>` : ''}
+                        ${job.data && job.data.instructions && job.data.instructions.duplex !== undefined ? `<p class="text-sm text-gray-600">Printing: ${job.data.instructions.duplex ? 'Front & Back' : 'Single Side'}</p>` : ''}
                     </div>
                     <div class="flex items-center space-x-2">
                         <span class="status-badge status-${job.status}">${job.status}</span>
@@ -1067,6 +1108,144 @@
 
         // Initialize connection status check
         checkConnectionStatus();
+
+        // Chat functionality
+        let currentChatJid = null;
+
+        async function refreshChats() {
+            try {
+                const response = await fetch('/api/whatsapp/chats');
+                const data = await response.json();
+                if (data.success) {
+                    updateChatList(data.chats);
+                }
+            } catch (error) {
+                console.error('Error refreshing chats:', error);
+            }
+        }
+
+        function updateChatList(chats) {
+            const container = document.getElementById('chatList');
+            container.innerHTML = '';
+
+            if (!chats || chats.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-center">No chats available</p>';
+                return;
+            }
+
+            chats.forEach(chat => {
+                const chatElement = document.createElement('div');
+                chatElement.className = 'border rounded p-3 hover:bg-gray-50 cursor-pointer';
+                chatElement.onclick = () => openChat(chat.remoteJid);
+                chatElement.innerHTML = `
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <p class="font-medium">${chat.remoteJid.split('@')[0]}</p>
+                            <p class="text-sm text-gray-500">${chat.lastMessage.content}</p>
+                        </div>
+                        <div class="text-xs text-gray-400">
+                            ${new Date(chat.lastMessage.timestamp).toLocaleTimeString()}
+                        </div>
+                    </div>
+                `;
+                container.appendChild(chatElement);
+            });
+        }
+
+        async function openChat(remoteJid) {
+            currentChatJid = remoteJid;
+            document.getElementById('chatTitle').textContent = `Chat with ${remoteJid.split('@')[0]}`;
+            document.getElementById('chatWindow').classList.remove('hidden');
+
+            try {
+                const response = await fetch(`/api/whatsapp/chats/${remoteJid}`);
+                const data = await response.json();
+                if (data.success) {
+                    updateChatMessages(data.messages);
+                }
+            } catch (error) {
+                console.error('Error loading chat messages:', error);
+            }
+        }
+
+        function closeChat() {
+            currentChatJid = null;
+            document.getElementById('chatWindow').classList.add('hidden');
+            document.getElementById('chatMessages').innerHTML = '';
+        }
+
+        function updateChatMessages(messages) {
+            const container = document.getElementById('chatMessages');
+            container.innerHTML = '';
+
+            messages.forEach(message => {
+                const messageElement = document.createElement('div');
+                messageElement.className = `flex ${message.fromMe ? 'justify-end' : 'justify-start'}`;
+                messageElement.innerHTML = `
+                    <div class="max-w-xs px-3 py-2 rounded-lg ${message.fromMe ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-800'}">
+                        <p class="text-sm">${message.content}</p>
+                        <p class="text-xs ${message.fromMe ? 'text-blue-100' : 'text-gray-500'} mt-1">
+                            ${new Date(message.timestamp).toLocaleTimeString()}
+                        </p>
+                    </div>
+                `;
+                container.appendChild(messageElement);
+            });
+
+            // Scroll to bottom
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function handleChatKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendChatMessage();
+            }
+        }
+
+        async function sendChatMessage() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (!message || !currentChatJid) return;
+
+            try {
+                // For now, just show the message locally
+                // In a real implementation, you'd send this via WhatsApp API
+                const messageData = {
+                    timestamp: new Date().toISOString(),
+                    fromMe: true,
+                    type: 'text',
+                    content: message
+                };
+
+                const container = document.getElementById('chatMessages');
+                const messageElement = document.createElement('div');
+                messageElement.className = 'flex justify-end';
+                messageElement.innerHTML = `
+                    <div class="max-w-xs px-3 py-2 rounded-lg bg-blue-500 text-white">
+                        <p class="text-sm">${message}</p>
+                        <p class="text-xs text-blue-100 mt-1">
+                            ${new Date().toLocaleTimeString()}
+                        </p>
+                    </div>
+                `;
+                container.appendChild(messageElement);
+                container.scrollTop = container.scrollHeight;
+
+                input.value = '';
+
+                // Note: Actual sending via WhatsApp would require additional API endpoints
+                showNotification('Message sent (demo)', 'success');
+            } catch (error) {
+                console.error('Error sending message:', error);
+                showNotification('Failed to send message', 'error');
+            }
+        }
+
+        // Initialize chat refresh on page load
+        window.addEventListener('load', () => {
+            // ... existing code ...
+            setInterval(refreshChats, 10000); // Refresh chats every 10 seconds
+        });
 
         // Remove Task Management keyboard shortcuts
     </script>

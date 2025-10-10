@@ -268,7 +268,8 @@ class PrinterManager {
             paperSize = 'a4',
             paperType = 'plain',
             colorPages = [],
-            priority = 'normal'
+            priority = 'normal',
+            duplex = false
         } = options;
 
         const targetPrinter = printerName || this.defaultPrinter;
@@ -279,6 +280,13 @@ class PrinterManager {
         // Add copies
         if (copies > 1) {
             command += ` /c:${copies}`;
+        }
+
+        // Add duplex option
+        if (duplex) {
+            command += ` /o:d`; // d for duplex (double-sided)
+        } else {
+            command += ` /o:s`; // s for simplex (single-sided)
         }
 
         return command;

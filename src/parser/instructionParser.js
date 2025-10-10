@@ -10,7 +10,8 @@ class InstructionParser {
             paperType: this.extractPaperType(text),
             copies: this.extractCopies(text),
             priority: this.extractPriority(text),
-            deadline: this.extractDeadline(text)
+            deadline: this.extractDeadline(text),
+            duplex: this.extractDuplex(text)
         };
 
         return instructions;
@@ -95,6 +96,29 @@ class InstructionParser {
         }
 
         return null;
+    }
+
+    extractDuplex(text) {
+        const textLower = text.toLowerCase();
+
+        // Check for duplex/front and back patterns
+        if (textLower.includes('front and back') ||
+            textLower.includes('double sided') ||
+            textLower.includes('duplex') ||
+            textLower.includes('both sides')) {
+            return true;
+        }
+
+        // Check for single sided patterns
+        if (textLower.includes('single side') ||
+            textLower.includes('one side') ||
+            textLower.includes('front only') ||
+            textLower.includes('back only')) {
+            return false;
+        }
+
+        // Default to false (single sided)
+        return false;
     }
 }
 

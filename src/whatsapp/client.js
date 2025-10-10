@@ -52,6 +52,8 @@ class WhatsAppClient extends EventEmitter {
         this.SESSION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
         this.imageBatchBuffer = new Map(); // { [jid]: { images: [], timer: NodeJS.Timeout|null } }
         this.IMAGE_BATCH_WINDOW_MS = 60 * 1000; // 1 minute
+        this.chatHistory = new Map(); // { [jid]: [{timestamp, fromMe, message, type}] }
+        this.MAX_CHAT_HISTORY = 100; // Keep last 100 messages per chat
     }
 
     initializeAuthFolder() {
@@ -356,7 +358,7 @@ class WhatsAppClient extends EventEmitter {
                 console.log('Skipping message processing: WhatsApp not connected');
                 return;
             }
-            
+
             const messageContent = message.message;
             if (!messageContent) return;
 
@@ -366,6 +368,9 @@ class WhatsAppClient extends EventEmitter {
                 // Ignore group, community, or broadcast messages
                 return;
             }
+
+            // Store message in chat history
+            this.storeMessage(remoteJid, message);
 
             // Handle document messages
             if (messageContent.documentMessage) {
@@ -452,7 +457,8 @@ class WhatsAppClient extends EventEmitter {
                     paperSize: 'a4',
                     paperType: 'plain',
                     colorPages: [],
-                    priority: 'normal'
+                    priority: 'normal',
+                    duplex: false
                 },
                 timestamp: new Date().toISOString(),
                 fileSize: fileData.size
@@ -471,8 +477,9 @@ class WhatsAppClient extends EventEmitter {
                 `• "Color pages 1-3" - for specific color pages\n` +
                 `• "A3 paper" - for different paper size\n` +
                 `• "Urgent" - for priority printing\n` +
-                `• "Glossy paper" - for different paper type\n\n` +
-                `💬 Or just reply "print" for default settings (1 copy, A4)`
+                `• "Glossy paper" - for different paper type\n` +
+                `• "Front and back" - for double-sided printing\n\n` +
+                `💬 Or just reply "print" for default settings (1 copy, A4, single-sided)`
             );
 
         } catch (error) {
@@ -581,7 +588,8 @@ class WhatsAppClient extends EventEmitter {
                         `📋 Copies: ${updatedJob.instructions.copies}\n` +
                         `📏 Paper: ${updatedJob.instructions.paperSize.toUpperCase()}\n` +
                         `🎨 Color pages: ${updatedJob.instructions.colorPages.length > 0 ? updatedJob.instructions.colorPages.join(', ') : 'None'}\n` +
-                        `⏰ Priority: ${updatedJob.instructions.priority}\n\n` +
+                        `⏰ Priority: ${updatedJob.instructions.priority}\n` +
+                        `📄 Printing: ${updatedJob.instructions.duplex ? 'Front & Back' : 'Single Side'}\n\n` +
                         `🖨️ ${queueMessage}`
                     );
                 } catch (queueError) {
@@ -611,6 +619,7 @@ class WhatsAppClient extends EventEmitter {
 • "Color pages 1-3"
 • "A3 paper, urgent"
 • "3 copies, glossy paper"
+• "Front and back" for double-sided printing
 
 🆘 Need help? Just ask!
 Type "exit" anytime to end this session.`);
@@ -657,7 +666,8 @@ Type "exit" anytime to end this session.`);
                                 paperType: 'photo',
                                 color: text === 'print color',
                                 perPage: session.imageBatchPerPage,
-                                priority: 'normal'
+                                priority: 'normal',
+                                duplex: false
                             },
                             timestamp: new Date().toISOString()
                         };
@@ -783,7 +793,8 @@ Type "exit" anytime to end this session.`);
                             paperSize: 'a4',
                             paperType: 'photo',
                             colorPages: [1],
-                            priority: 'normal'
+                            priority: 'normal',
+                            duplex: false
                         },
                         timestamp: images[0].timestamp,
                         fileSize: images[0].size
@@ -987,11 +998,82 @@ Type "exit" anytime to end this session.`);
                 return { success: false, message: 'not ready' };
             }
             await this.client.sendMessage(to, { text: message });
+
+            // Store outgoing message in chat history
+            this.storeMessage(to, {
+                key: { fromMe: true, remoteJid: to },
+                message: { conversation: message },
+                messageTimestamp: Date.now() / 1000
+            });
+
             return { success: true };
         } catch (error) {
             console.error('Error sending message:', error);
             // Do not throw to avoid cascading crashes during transient disconnects
             return { success: false, error: error.message };
+        }
+    }
+
+    storeMessage(remoteJid, message) {
+        if (!this.chatHistory.has(remoteJid)) {
+            this.chatHistory.set(remoteJid, []);
+        }
+
+        const chatMessages = this.chatHistory.get(remoteJid);
+        const messageData = {
+            timestamp: message.messageTimestamp ? new Date(message.messageTimestamp * 1000).toISOString() : new Date().toISOString(),
+            fromMe: message.key.fromMe || false,
+            type: this.getMessageType(message.message),
+            content: this.getMessageContent(message.message)
+        };
+
+        chatMessages.push(messageData);
+
+        // Keep only the last MAX_CHAT_HISTORY messages
+        if (chatMessages.length > this.MAX_CHAT_HISTORY) {
+            chatMessages.splice(0, chatMessages.length - this.MAX_CHAT_HISTORY);
+        }
+
+        // Emit chat update event
+        this.emit('chatMessage', { remoteJid, message: messageData });
+    }
+
+    getMessageType(messageContent) {
+        if (!messageContent) return 'unknown';
+        if (messageContent.conversation || messageContent.extendedTextMessage) return 'text';
+        if (messageContent.imageMessage) return 'image';
+        if (messageContent.documentMessage) return 'document';
+        return 'unknown';
+    }
+
+    getMessageContent(messageContent) {
+        if (!messageContent) return '';
+        if (messageContent.conversation) return messageContent.conversation;
+        if (messageContent.extendedTextMessage) return messageContent.extendedTextMessage.text;
+        if (messageContent.imageMessage) return '[Image]';
+        if (messageContent.documentMessage) return `[Document: ${messageContent.documentMessage.fileName || 'Unknown'}]`;
+        return '[Unknown message type]';
+    }
+
+    getChatHistory(remoteJid = null, limit = 50) {
+        if (remoteJid) {
+            // Get history for specific chat
+            const messages = this.chatHistory.get(remoteJid) || [];
+            return messages.slice(-limit);
+        } else {
+            // Get all chats with their latest messages
+            const chats = [];
+            for (const [jid, messages] of this.chatHistory.entries()) {
+                if (messages.length > 0) {
+                    const latestMessage = messages[messages.length - 1];
+                    chats.push({
+                        remoteJid: jid,
+                        lastMessage: latestMessage,
+                        messageCount: messages.length
+                    });
+                }
+            }
+            return chats.sort((a, b) => new Date(b.lastMessage.timestamp) - new Date(a.lastMessage.timestamp));
         }
     }
 
